@@ -1,0 +1,57 @@
+{
+  "name": "@aszura-inc/saltline-browser",
+  "version": "0.1.0",
+  "description": "Browser helper for Saltline's connect and sign-in flows: PKCE, redirect and callback, with optional React bindings. Talks only to your own backend.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aszura-Inc/saltline.git",
+    "directory": "browser"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    }
+  },
+  "unpkg": "./dist/saltline.min.js",
+  "jsdelivr": "./dist/saltline.min.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && esbuild src/global.ts --bundle --minify --format=iife --target=es2020 --outfile=dist/saltline.min.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
+    "prepack": "node -e \"require('fs').copyFileSync('../LICENSE','LICENSE')\"",
+    "release:patch": "npm version patch --no-git-tag-version && npm publish --access public",
+    "release:minor": "npm version minor --no-git-tag-version && npm publish --access public",
+    "release:major": "npm version major --no-git-tag-version && npm publish --access public"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "18.3.12",
+    "@types/react-test-renderer": "18.3.1",
+    "esbuild": "0.25.10",
+    "react": "18.3.1",
+    "react-test-renderer": "18.3.1",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "react": ">=16.8"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  }
+}

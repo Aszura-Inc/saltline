@@ -1,0 +1,47 @@
+{
+  "description": "Shared by both SDKs. How a non-2xx Saltline response becomes an error: code from the body, else the x-saltline-error-code header, else HTTP_<status>; message from the body's error, else a generic one.",
+  "cases": [
+    {
+      "name": "specific code in body and header",
+      "status": 401,
+      "headers": { "x-saltline-error-code": "API_KEY_EXPIRED", "x-saltline-request-id": "01J0000000000000000000REQ1" },
+      "body": "{\"error\":\"Your API key has expired. Please generate a new one in the dashboard.\",\"code\":\"API_KEY_EXPIRED\"}",
+      "expected": { "status": 401, "code": "API_KEY_EXPIRED", "message": "Your API key has expired. Please generate a new one in the dashboard.", "requestId": "01J0000000000000000000REQ1" }
+    },
+    {
+      "name": "generic code",
+      "status": 404,
+      "headers": { "x-saltline-error-code": "NOT_FOUND" },
+      "body": "{\"error\":\"This endpoint doesn't exist.\",\"code\":\"NOT_FOUND\"}",
+      "expected": { "status": 404, "code": "NOT_FOUND", "message": "This endpoint doesn't exist.", "requestId": null }
+    },
+    {
+      "name": "code only in header",
+      "status": 409,
+      "headers": { "x-saltline-error-code": "CONFLICT" },
+      "body": "{\"error\":\"Refresh in progress, please retry\"}",
+      "expected": { "status": 409, "code": "CONFLICT", "message": "Refresh in progress, please retry", "requestId": null }
+    },
+    {
+      "name": "extra fields are kept, code still read",
+      "status": 429,
+      "headers": {},
+      "body": "{\"error\":\"You've reached your API request limit.\",\"code\":\"LIMIT_EXCEEDED\",\"currentPeriodEnd\":\"2026-11-01T00:00:00Z\"}",
+      "expected": { "status": 429, "code": "LIMIT_EXCEEDED", "message": "You've reached your API request limit.", "requestId": null }
+    },
+    {
+      "name": "not JSON (an edge or gateway page)",
+      "status": 502,
+      "headers": {},
+      "body": "<html>Bad gateway</html>",
+      "expected": { "status": 502, "code": "HTTP_502", "message": "Saltline returned HTTP 502.", "requestId": null }
+    },
+    {
+      "name": "empty body",
+      "status": 503,
+      "headers": {},
+      "body": "",
+      "expected": { "status": 503, "code": "HTTP_503", "message": "Saltline returned HTTP 503.", "requestId": null }
+    }
+  ]
+}

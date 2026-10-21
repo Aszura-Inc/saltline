@@ -1,0 +1,172 @@
+{
+  "description": "Shared by both SDKs. HMAC-SHA256 hex over timestamp+body, key = base64-decoded secret, comma-separated signatures, tolerance 300 seconds.",
+  "toleranceSeconds": 300,
+  "cases": [
+    {
+      "name": "valid",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": true
+    },
+    {
+      "name": "rotation: second signature matches",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "dee1d3eb62ee2720cad5da89dc11e154edf0bd70bbbc954ed8ee86fa39d394f3,1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": true
+    },
+    {
+      "name": "rotation: second secret matches",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "dee1d3eb62ee2720cad5da89dc11e154edf0bd70bbbc954ed8ee86fa39d394f3",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": true
+    },
+    {
+      "name": "empty body",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "",
+      "signature": "bb53d38c2ac487e7ada7f3a67bb6c0bd96c4c1f98ac1c8ea728decf8ca6a5b87",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": true
+    },
+    {
+      "name": "unicode body",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"name\":\"héllo 🔐\"}",
+      "signature": "6b3f99f3df9413b48c75debcdf6e511bec91b8a1cf73665708521088a4ce1045",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": true
+    },
+    {
+      "name": "tampered body",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[1]}",
+      "signature": "1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "tampered timestamp",
+      "timestamp": "2026-10-21T12:00:01.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "wrong secret",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "stale timestamp (older than tolerance)",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:10:00.001Z",
+      "valid": false
+    },
+    {
+      "name": "timestamp from the future beyond tolerance",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "1bb27bdee2c9097608153e9f241049fb786bed9e62d6f803cf048096f01b5b64",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T11:54:59.999Z",
+      "valid": false
+    },
+    {
+      "name": "missing signature",
+      "timestamp": "2026-10-21T12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "malformed timestamp",
+      "timestamp": "not-a-date",
+      "body": "{\"connections\":[]}",
+      "signature": "e7736e2f7ae634d2940b67f31ad93623d25e086da1252d2a13fcc748e29e35a7",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "non-ISO timestamp: 2026-10-21 12:00:00.000Z",
+      "timestamp": "2026-10-21 12:00:00.000Z",
+      "body": "{\"connections\":[]}",
+      "signature": "aca60495c2d93350dd9b5ab146767e240478b3ac170ef0b4e451e876355d5258",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "non-ISO timestamp: 2026-10-21T12:00:00",
+      "timestamp": "2026-10-21T12:00:00",
+      "body": "{\"connections\":[]}",
+      "signature": "d599e497b04530bdac01ca06dbea3119c8bfd78522b0626de82930215bcb3eb6",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": false
+    },
+    {
+      "name": "ISO timestamp with offset",
+      "timestamp": "2026-10-21T14:00:00.000+02:00",
+      "body": "{\"connections\":[]}",
+      "signature": "94f68a62c14a22162e02aa114d32ff35340202941c15b358ef1b955de130856c",
+      "secrets": [
+        "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ],
+      "now": "2026-10-21T12:01:00.000Z",
+      "valid": true
+    }
+  ]
+}

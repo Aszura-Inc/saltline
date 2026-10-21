@@ -1,0 +1,18 @@
+# PHP
+/vendor/
+/composer.lock
+.phpunit.cache/
+
+# Node
+node_modules/
+/node/dist/
+/browser/dist/
+# Copied in from the repo root by `npm pack` / `npm publish`
+/node/LICENSE
+/browser/LICENSE
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

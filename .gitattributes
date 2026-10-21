@@ -1,0 +1,18 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Generated files are compared byte-for-byte by `openapi:check`; a CRLF checkout (core.autocrlf on
+# Windows) would make them look stale. Keep them LF everywhere.
+*.gen.ts text eol=lf
+
+# Composer installs this repo as a zip of the tagged commit. Everything below stays out of that zip,
+# so PHP users get php/src, composer.json, LICENSE and README.md — not the Node SDK or the tests.
+/node export-ignore
+/tests export-ignore
+/php/tests export-ignore
+/php/phpunit.xml export-ignore
+/openapi.yaml export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.github export-ignore
+/browser export-ignore

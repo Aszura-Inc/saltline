@@ -1,0 +1,41 @@
+{
+    "name": "saltline/php",
+    "description": "Saltline API client for PHP",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["saltline", "oauth", "integrations", "webhooks", "api", "sdk"],
+    "homepage": "https://github.com/Aszura-Inc/saltline",
+    "require": {
+        "php": "^8.1",
+        "php-http/discovery": "^1.19",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.8",
+        "phpunit/phpunit": "^10.5 || ^11.0"
+    },
+    "suggest": {
+        "guzzlehttp/guzzle": "A PSR-18 HTTP client, found automatically when no client is passed in"
+    },
+    "autoload": {
+        "psr-4": {
+            "Saltline\\": "php/src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Saltline\\Tests\\": "php/tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit -c php/phpunit.xml"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    }
+}

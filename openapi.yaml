@@ -1,0 +1,1183 @@
+openapi: 3.2.0
+
+info:
+  title: Saltline API
+  version: 1.0.0
+  summary: Connect your users' third-party accounts and call those APIs without handling their credentials.
+  description: |
+    One host per environment, path-routed. Every path starts with the API version (`/v1`); the
+    sign-in page, the hosted setup form and webhook ingest URLs are unversioned and not part of
+    this document.
+
+    **Errors** are always `{ "error": "…", "code": "…" }`. Branch on `code` (also sent as the
+    `x-saltline-error-code` header), never on `error`, which is human-readable text. A code that
+    is just the status as a word (`BAD_REQUEST`, `NOT_FOUND`, …) is generic and may later be
+    refined into a specific one; a specific code never changes meaning.
+
+    **Every response** carries `x-saltline-request-id` and `x-saltline-timestamp`; responses to
+    authorized requests also carry `x-saltline-hmac-256` when signing is on for the environment.
+    The signature is hex HMAC-SHA256 over `timestamp ‖ raw body`, keyed with the environment's
+    base64-decoded signing secret; during a key rotation the header holds two comma-separated
+    signatures and either may match.
+
+servers:
+  - url: https://api.saltline.dev/v1
+    description: Production
+  - url: https://api-staging.saltline.dev/v1
+    description: Staging
+
+security:
+  - apiKey: []
+
+tags:
+  - name: setup
+    summary: Setup
+    kind: nav
+    description: Discover what your environment offers.
+  - name: data-access
+    summary: Data access
+    kind: nav
+    description: Connect accounts and call provider APIs on your users' behalf.
+  - name: sign-in
+    summary: Sign-in
+    kind: nav
+    description: Let users sign in to your app with a provider account.
+  - name: environment
+    summary: Environment
+    parent: setup
+    description: Read-only information about the caller's environment.
+  - name: connections
+    summary: Connections
+    parent: data-access
+    description: An end user's authorized link to a provider, identified by a connection key.
+  - name: proxy
+    summary: Proxy
+    parent: data-access
+    description: Call a provider's API with the connection's credentials injected.
+  - name: webhooks
+    summary: Webhooks
+    parent: data-access
+    description: Provider webhook subscriptions as a resource.
+  - name: auth
+    summary: Login sessions
+    parent: sign-in
+    description: End-user sign-in through a provider (OAuth2 with PKCE), identified by a session key.
+
+paths:
+  # ─── Environment ────────────────────────────────────────────────────────────────────────────
+  /environment/integrations:
+    get:
+      operationId: listIntegrations
+      tags: [environment]
+      summary: List the integrations in your environment
+      responses:
+        '200':
+          description: The environment's integrations, with public provider details.
+          headers: &responseHeaders
+            x-saltline-request-id: { $ref: '#/components/headers/RequestId' }
+            x-saltline-timestamp: { $ref: '#/components/headers/Timestamp' }
+            x-saltline-hmac-256: { $ref: '#/components/headers/Signature' }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [integrations]
+                properties:
+                  integrations:
+                    type: array
+                    items: { $ref: '#/components/schemas/Integration' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /environment/identity-providers:
+    get:
+      operationId: listIdentityProviders
+      tags: [environment]
+      summary: List the providers enabled for sign-in
+      responses:
+        '200':
+          description: Identity providers and their active sign-in integrations.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [identityProviders]
+                properties:
+                  identityProviders:
+                    type: array
+                    items: { $ref: '#/components/schemas/IdentityProvider' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  # ─── Connections ────────────────────────────────────────────────────────────────────────────
+  /connections/{providerSlug}/init:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/integrationKey'
+    post:
+      operationId: initConnection
+      tags: [connections]
+      summary: Start connecting a user's account
+      description: |
+        Returns the new `connectionKey` and an `authorizationUrl` to send the user to: the
+        provider's consent page for OAuth, or Saltline's hosted form for field-based auth. When
+        the flow finishes, the user lands on your `redirectUrl` with `?connectionKey=…`, or
+        `?error=auth_error&error_message=…`. The connection is not usable yet: call `claim` with
+        the PKCE verifier for `codeChallenge` to activate it. The user has ten minutes to finish
+        with the provider; after that, the finished connection waits thirty minutes for `claim`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [auth, redirectUrl, codeChallenge, codeChallengeMethod]
+              properties:
+                auth:
+                  $ref: '#/components/schemas/AuthType'
+                redirectUrl:
+                  type: string
+                  format: uri
+                  description: Where the user returns when the flow ends.
+                codeChallenge:
+                  type: string
+                  description: PKCE challenge; keep the verifier where only this user's browser reaches it, for `claim`.
+                codeChallengeMethod: { type: string, const: S256 }
+                externalUserId:
+                  type: [string, 'null']
+                  description: Your own ID for this user, stored on the connection.
+                theme:
+                  type: string
+                  enum: [light, dark]
+                  default: light
+      responses:
+        '200':
+          description: The connection is pending; send the user to `authorizationUrl`.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connectionKey, authorizationUrl]
+                properties:
+                  connectionKey: { type: string }
+                  authorizationUrl: { type: string, format: uri }
+                  message: { type: string }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /connections/{providerSlug}/claim:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/connectionKey'
+    post:
+      operationId: claimConnection
+      tags: [connections]
+      summary: Activate a connection, proving you started it
+      description: |
+        Call once the user is back at your `redirectUrl`, with the `connectionKey` and the PKCE
+        verifier for the `codeChallenge` you sent to `init`. The redirect isn't required: you
+        already have the `connectionKey` from `init`, so if the redirect never arrives (a closed
+        tab, a mobile in-app browser), claim on the user's next request instead — a 404 until
+        they finish with the provider. Works once; until it succeeds the connection can't be
+        used, and thirty minutes after the provider step it's gone.
+        `CONNECTION_NOT_FOUND` (404) means it expired, never completed or was already claimed;
+        `CODE_VERIFIER_MISMATCH` (403) means the verifier isn't the one for this connection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [codeVerifier]
+              properties:
+                codeVerifier: { type: string, description: The PKCE verifier for `codeChallenge`. }
+      responses:
+        '200':
+          description: The connection is active.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connection]
+                properties:
+                  connection: { $ref: '#/components/schemas/Connection' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /connections/{providerSlug}/refresh:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/connectionKey'
+    post:
+      operationId: refreshConnection
+      tags: [connections]
+      summary: Refresh a connection's OAuth2 tokens
+      description: |
+        Returns the connection as it stands afterwards. A connection that is still valid for
+        more than a minute is returned unchanged. `409` means another refresh of the same
+        connection is in progress; retry shortly.
+      responses:
+        '200':
+          description: The refreshed (or still-valid) connection.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connection]
+                properties:
+                  connection: { $ref: '#/components/schemas/Connection' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /connections/{providerSlug}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/connectionKey'
+      - $ref: '#/components/parameters/integrationKey'
+    delete:
+      operationId: revokeConnection
+      tags: [connections]
+      summary: Revoke and disconnect a connection
+      responses:
+        '200':
+          description: The provider accepted the revoke and the connection is disconnected.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Revoked' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /connections/{providerSlug}/connections:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+    get:
+      operationId: listConnections
+      tags: [connections]
+      summary: List this provider's connections
+      parameters:
+        - name: x-saltline-integration-key
+          in: header
+          required: true
+          description: The integration whose connections to list.
+          schema: { $ref: '#/components/schemas/Key' }
+      responses:
+        '200':
+          description: Connections for this provider in your environment.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connections]
+                properties:
+                  connections:
+                    type: array
+                    items: { $ref: '#/components/schemas/Connection' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  # ─── Proxy ──────────────────────────────────────────────────────────────────────────────────
+  /proxy/{providerSlug}/{providerPath}:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - name: providerPath
+        in: path
+        required: true
+        description: |
+          The provider API path, **slashes included** (`1/boards/abc123`). OpenAPI path
+          parameters can't span segments, so generated clients will percent-encode the slashes;
+          build this URL by hand. The query string is forwarded as-is.
+        schema: { type: string }
+      - $ref: '#/components/parameters/connectionKey'
+      - $ref: '#/components/parameters/integrationKey'
+      - name: x-saltline-version
+        in: header
+        description: |
+          Provider API version label to pin. An unknown label falls back to the default version;
+          check `X-Saltline-Version-Served` on the response.
+        schema: { type: string }
+      - name: x-saltline-content-type
+        in: header
+        description: How the provider should receive the body (the body you send stays JSON).
+        schema: { type: string, examples: [application/x-www-form-urlencoded] }
+      - name: x-saltline-callback-url
+        in: header
+        description: |
+          Public HTTPS URL. Credentials, usage limit and connection are checked first and any
+          failure is answered directly; then Saltline answers `202` and POSTs the provider's
+          response to this URL (see the `proxyCallback` webhook).
+        schema: { type: string, format: uri }
+    # Six operations, one per method; only operationId differs, so the rest is one anchor.
+    get:
+      operationId: proxyGet
+      tags: [proxy]
+      summary: Call the provider (GET)
+      description: &proxyDescription |
+        Saltline injects the connection's credentials, forwards the call to the provider's base
+        URL for the served version, and returns the provider's response as it sent it — status,
+        headers and body (secrets redacted). A provider error is not a Saltline error: it has no
+        `code` and no `x-saltline-error-code` header. Redirects are followed by Saltline.
+      responses: &proxyResponses
+        '202':
+          description: Async call accepted (`x-saltline-callback-url` was set).
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requestId]
+                properties:
+                  requestId:
+                    { type: string, description: Matches the callback's `x-saltline-request-id`. }
+        '2XX': &proxyRelay
+          description: |
+            The provider's response, relayed as-is with Saltline's headers added — or a Saltline
+            error, recognisable by `x-saltline-error-code`.
+          headers:
+            x-saltline-request-id: { $ref: '#/components/headers/RequestId' }
+            x-saltline-timestamp: { $ref: '#/components/headers/Timestamp' }
+            x-saltline-hmac-256: { $ref: '#/components/headers/Signature' }
+            x-saltline-error-code: { $ref: '#/components/headers/ErrorCode' }
+            X-Saltline-Version-Served: { $ref: '#/components/headers/VersionServed' }
+          content:
+            '*/*':
+              schema: {}
+        '4XX': *proxyRelay
+        '5XX': *proxyRelay
+    post:
+      operationId: proxyPost
+      tags: [proxy]
+      summary: Call the provider (POST)
+      description: *proxyDescription
+      requestBody: &proxyBody
+        description: JSON; templated into the provider request. Use `x-saltline-content-type` to change how the provider receives it.
+        content:
+          application/json:
+            schema: {}
+      responses: *proxyResponses
+    put:
+      operationId: proxyPut
+      tags: [proxy]
+      summary: Call the provider (PUT)
+      description: *proxyDescription
+      requestBody: *proxyBody
+      responses: *proxyResponses
+    patch:
+      operationId: proxyPatch
+      tags: [proxy]
+      summary: Call the provider (PATCH)
+      description: *proxyDescription
+      requestBody: *proxyBody
+      responses: *proxyResponses
+    delete:
+      operationId: proxyDelete
+      tags: [proxy]
+      summary: Call the provider (DELETE)
+      description: *proxyDescription
+      requestBody: *proxyBody
+      responses: *proxyResponses
+    head:
+      operationId: proxyHead
+      tags: [proxy]
+      summary: Call the provider (HEAD)
+      description: *proxyDescription
+      responses: *proxyResponses
+
+  # ─── Webhooks ───────────────────────────────────────────────────────────────────────────────
+  /webhooks/{providerSlug}:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/connectionKey'
+      - $ref: '#/components/parameters/integrationKey'
+    post:
+      operationId: registerWebhook
+      tags: [webhooks]
+      summary: Register a webhook at the provider
+      description: |
+        Creates the subscription at the provider and records it. Events the provider sends are
+        verified and forwarded to your integration's webhook URLs (see the `webhookDelivery`
+        webhook).
+      parameters:
+        - name: x-saltline-webhook-kind
+          in: header
+          description: Which of the provider's webhook kinds to register.
+          schema: { type: string, pattern: '^[a-z0-9][a-z0-9-]*$', maxLength: 128 }
+        - name: x-saltline-webhook-key
+          in: header
+          description: Choose the webhook key yourself. A few words, such as `init`, are reserved.
+          schema: { $ref: '#/components/schemas/Key' }
+        - name: x-saltline-metadata
+          in: header
+          description: Up to 1 KB, echoed on every delivery as `x-saltline-metadata`.
+          schema: { type: string, maxLength: 1024 }
+        - $ref: '#/components/parameters/providerVersion'
+      requestBody:
+        description: Kind-specific values the provider's registration call is built from.
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Registered at the provider.
+          headers: &versionedHeaders
+            x-saltline-request-id: { $ref: '#/components/headers/RequestId' }
+            x-saltline-timestamp: { $ref: '#/components/headers/Timestamp' }
+            x-saltline-hmac-256: { $ref: '#/components/headers/Signature' }
+            X-Saltline-Version-Served: { $ref: '#/components/headers/VersionServed' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookMutation' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+    get:
+      operationId: listWebhooks
+      tags: [webhooks]
+      summary: List webhooks
+      description: Saltline's own records for this integration, filtered to the connection.
+      responses:
+        '200':
+          description: Webhook records.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [webhooks]
+                properties:
+                  webhooks:
+                    type: array
+                    items: { $ref: '#/components/schemas/Webhook' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /webhooks/{providerSlug}/{webhookKey}:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - name: webhookKey
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/Key' }
+      - $ref: '#/components/parameters/connectionKey'
+      - $ref: '#/components/parameters/integrationKey'
+    get:
+      operationId: getWebhook
+      tags: [webhooks]
+      summary: Get one webhook
+      responses:
+        '200':
+          description: The webhook record.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [webhook]
+                properties:
+                  webhook: { $ref: '#/components/schemas/Webhook' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+    patch:
+      operationId: updateWebhook
+      tags: [webhooks]
+      summary: Update a webhook at the provider
+      parameters:
+        - $ref: '#/components/parameters/providerVersion'
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Updated at the provider.
+          headers: *versionedHeaders
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookMutation' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+    delete:
+      operationId: deleteWebhook
+      tags: [webhooks]
+      summary: Unregister a webhook
+      description: |
+        Unregisters at the provider (a provider `404`/`410` counts as done) and marks the record
+        revoked. A manual webhook has nothing to unregister; its record is cleared.
+      parameters:
+        - $ref: '#/components/parameters/providerVersion'
+      responses:
+        '200':
+          description: Unregistered.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, webhookKey]
+                properties:
+                  success: { const: true }
+                  webhookKey: { type: string }
+                  providerWebhookId: { type: [string, 'null'] }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /webhooks/{providerSlug}/init:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/connectionKey'
+      - $ref: '#/components/parameters/integrationKey'
+    post:
+      operationId: initManualWebhook
+      tags: [webhooks]
+      summary: Start a manual webhook registration
+      description: |
+        For providers whose webhooks are created by hand in their dashboard. Returns the ingest
+        URL to paste there and a hosted `setupUrl` that collects what the dashboard gives back.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                redirectUrl:
+                  type: string
+                  format: uri
+                  description: Where the hosted setup form returns the user.
+      responses:
+        '200':
+          description: The pending webhook and the fields the hosted setup form asks for.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, sessionId, webhookKey, setupUrl, ingressUrl, status, fields]
+                properties:
+                  success: { const: true }
+                  sessionId: { type: string }
+                  webhookKey: { type: string }
+                  setupUrl: { type: string, format: uri }
+                  ingressUrl: { type: string, format: uri }
+                  status: { const: pending }
+                  fields:
+                    type: array
+                    items: { $ref: '#/components/schemas/FormField' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  # ─── Login sessions ─────────────────────────────────────────────────────────────────────────
+  /auth/{providerSlug}/init:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/integrationKey'
+    post:
+      operationId: initSession
+      tags: [auth]
+      summary: Start a sign-in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [auth, redirectUrl, codeChallenge, codeChallengeMethod]
+              properties:
+                auth: { type: string, const: oAuth2 }
+                redirectUrl: { type: string, format: uri }
+                codeChallenge:
+                  type: string
+                  description: PKCE challenge; keep the verifier for `claim`.
+                codeChallengeMethod: { type: string, const: S256 }
+                externalUserId: { type: [string, 'null'] }
+                theme: { type: string, enum: [light, dark], default: light }
+      responses:
+        '200':
+          description: The session is pending; send the user to `authorizationUrl`.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionKey, authorizationUrl]
+                properties:
+                  sessionKey: { type: string }
+                  authorizationUrl: { type: string, format: uri }
+                  message: { type: string }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /auth/{providerSlug}/claim:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/sessionKey'
+    post:
+      operationId: claimSession
+      tags: [auth]
+      summary: Read the signed-in user, proving you started the flow
+      description: |
+        Activates the session and returns the user, with the `sessionKey` from `init` (or the
+        redirect URL) and the PKCE verifier. The redirect isn't required, as for connections.
+        Works once; thirty minutes after the provider step an unclaimed sign-in is gone.
+        `SESSION_NOT_FOUND` (404) means it expired, never completed or was already claimed;
+        `CODE_VERIFIER_MISMATCH` (403) means the verifier isn't the one for this session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [codeVerifier]
+              properties:
+                codeVerifier: { type: string, description: The PKCE verifier for `codeChallenge`. }
+      responses:
+        '200':
+          description: The user's identity.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserInfo' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /auth/{providerSlug}/userinfo:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/sessionKey'
+      - $ref: '#/components/parameters/integrationKey'
+    post:
+      operationId: getSessionUser
+      tags: [auth]
+      summary: Fetch the user for an active session
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: The user's identity, fetched live from the provider.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserInfo' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /auth/{providerSlug}/refresh:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/sessionKey'
+    post:
+      operationId: refreshSession
+      tags: [auth]
+      summary: Refresh a session's tokens
+      description: '`409` means another refresh of the same session is in progress; retry shortly.'
+      responses:
+        '200':
+          description: The refreshed (or still-valid) session.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session: { $ref: '#/components/schemas/Session' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /auth/{providerSlug}/revoke:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - $ref: '#/components/parameters/sessionKey'
+      - $ref: '#/components/parameters/integrationKey'
+    delete:
+      operationId: revokeSession
+      tags: [auth]
+      summary: Revoke a session
+      responses:
+        '200':
+          description: The provider accepted the revoke.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Revoked' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+  /auth/{providerSlug}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/providerSlug'
+      - name: x-saltline-integration-key
+        in: header
+        description: Optional. Narrows the list to one integration.
+        schema: { $ref: '#/components/schemas/Key' }
+    get:
+      operationId: listSessions
+      tags: [auth]
+      summary: List this provider's sessions
+      responses:
+        '200':
+          description: Sessions for this provider in your environment.
+          headers: *responseHeaders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items: { $ref: '#/components/schemas/Session' }
+        '4XX': { $ref: '#/components/responses/Error' }
+        '5XX': { $ref: '#/components/responses/Error' }
+
+webhooks:
+  webhookDelivery:
+    post:
+      operationId: webhookDelivery
+      summary: A provider event, delivered to your integration's webhook URLs
+      description: Verify `x-saltline-hmac-256` exactly as for API responses.
+      parameters:
+        - { name: x-saltline-webhook-key, in: header, required: true, schema: { type: string } }
+        - { name: x-saltline-delivery-id, in: header, required: true, schema: { type: string } }
+        - { name: x-saltline-provider, in: header, required: true, schema: { type: string } }
+        - { name: x-saltline-provider-slug, in: header, required: true, schema: { type: string } }
+        - { name: x-saltline-metadata, in: header, schema: { type: string } }
+        - {
+            name: x-saltline-timestamp,
+            in: header,
+            required: true,
+            schema: { type: string, format: date-time },
+          }
+        - { name: x-saltline-hmac-256, in: header, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '2XX': { description: Accepted. Any other status is retried. }
+
+  proxyCallback:
+    post:
+      operationId: proxyCallback
+      summary: The provider's response to an async proxy call
+      description: |
+        The provider's status is not the callback's status; the body and headers are the
+        provider's (secrets redacted). `x-saltline-request-id` matches the `requestId` from the
+        `202`.
+      parameters:
+        - { name: x-saltline-request-id, in: header, required: true, schema: { type: string } }
+        - {
+            name: x-saltline-timestamp,
+            in: header,
+            required: true,
+            schema: { type: string, format: date-time },
+          }
+        - { name: x-saltline-hmac-256, in: header, schema: { type: string } }
+      requestBody:
+        content:
+          '*/*':
+            schema: {}
+      responses:
+        '2XX':
+          {
+            description: Accepted. A `5XX` or network error is retried up to three times; a `4XX` is not.,
+          }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        Your secret API key — the only client credential. Keep it server-side: every call is
+        made from your backend. It ends in `_<environmentId>`; treat the rest as opaque.
+
+  parameters:
+    providerSlug:
+      name: providerSlug
+      in: path
+      required: true
+      description: The provider, e.g. `trello` or `google-calendar`.
+      schema: { type: string, pattern: '^[a-z0-9]+(-[a-z0-9]+)*$' }
+    integrationKey:
+      name: x-saltline-integration-key
+      in: header
+      description: Only needed when the provider has several integrations and no default.
+      schema: { $ref: '#/components/schemas/Key' }
+    connectionKey:
+      name: x-saltline-connection-key
+      in: header
+      required: true
+      description: Which connected account to act as.
+      schema: { $ref: '#/components/schemas/Key' }
+    sessionKey:
+      name: x-saltline-session-key
+      in: header
+      required: true
+      schema: { $ref: '#/components/schemas/Key' }
+    providerVersion:
+      name: x-saltline-version
+      in: header
+      description: Provider API version label; unknown labels fall back to the default.
+      schema: { type: string }
+
+  schemas:
+    Key:
+      type: string
+      minLength: 1
+      maxLength: 255
+    AuthType:
+      type: string
+      enum: [oAuth1, oAuth2, api_key, basic, session]
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error: { type: string, description: Human-readable; may change. }
+        code: { $ref: '#/components/schemas/ErrorCode' }
+      additionalProperties: true
+    ErrorCode:
+      type: string
+      description: |
+        Stable; branch on this. New codes may be added: treat a code you do not know like its
+        status. The first fourteen are generic — the status as a word — and may later be refined.
+      enum:
+        - BAD_REQUEST
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - NOT_FOUND
+        - METHOD_NOT_ALLOWED
+        - CONFLICT
+        - PAYLOAD_TOO_LARGE
+        - UNSUPPORTED_MEDIA_TYPE
+        - UNPROCESSABLE
+        - RATE_LIMITED
+        - INTERNAL_ERROR
+        - BAD_GATEWAY
+        - UNAVAILABLE
+        - GATEWAY_TIMEOUT
+        - MISSING_CREDENTIALS
+        - INVALID_API_KEY_FORMAT
+        - INVALID_API_KEY
+        - API_KEY_EXPIRED
+        - IP_NOT_ALLOWED
+        - ENVIRONMENT_NOT_FOUND
+        - LIMIT_EXCEEDED
+        - PROVIDER_NOT_FOUND
+        - INTEGRATION_NOT_FOUND
+        - INTEGRATION_KEY_REQUIRED
+        - INVALID_INTEGRATION_KEY
+        - CONNECTION_NOT_FOUND
+        - SESSION_NOT_FOUND
+        - IDENTITY_NOT_FOUND
+        - WEBHOOK_NOT_FOUND
+        - MISSING_CONNECTION_KEY
+        - MISSING_SESSION_KEY
+        - MISSING_REDIRECT_URL
+        - MISSING_AUTH
+        - MISSING_AUTH_TYPE
+        - AUTH_TYPE_MISMATCH
+        - AUTH_TYPE_NOT_SUPPORTED
+        - MISSING_PROVIDER_HEADERS
+        - MISSING_PROVIDER_VERSION
+        - UNADDRESSED_ARRAY_ITEMS
+        - UNRESOLVED_PATH_TOKEN
+        - BLOCKED_PATH
+        - TOO_MANY_REDIRECTS
+        - MISSING_PKCE_PARAMETERS
+        - UNSUPPORTED_CODE_CHALLENGE_METHOD
+        - MISSING_CODE_VERIFIER
+        - CODE_VERIFIER_MISMATCH
+        - NO_CODE_CHALLENGE
+        - MISSING_TEMP_CONNECTION_KEY
+        - MISSING_TEMP_SESSION_KEY
+        - TEMP_CONNECTION_NOT_FOUND
+        - TEMP_SESSION_NOT_FOUND
+        - TEMP_WEBHOOK_NOT_FOUND
+        - CONNECTION_INIT_FAILED
+        - SESSION_INIT_FAILED
+        - AUTH_NOT_FOUND
+        - NO_AUTH_CONFIGURED
+        - NO_INTEGRATION_AUTHS
+        - NO_PROVIDER_IDENTITIES
+        - NO_REVOKE_CONFIG
+        - NO_USER_CONFIG
+        - MISSING_AUTH_CONFIG
+        - MISSING_AUTH_REQUEST_TEMPLATE
+        - MISSING_DEFAULT_AUTH_REQUEST_TEMPLATE_ID
+        - MISSING_PROVIDER_AUTH_ID
+        - MISSING_CONNECTION_FIELDS
+        - MISSING_WEBHOOK_FIELDS
+        - MISSING_RETURN_URL
+        - FIELD_TRANSFORM_FAILED
+        - USER_URL_TEMPLATE_FAILED
+        - REVOKE_URL_TEMPLATE_FAILED
+        - PROVIDER_UNREACHABLE
+        - AUTHORIZATION_URL_FAILED
+        - REQUEST_TOKEN_FAILED
+        - TOKEN_EXCHANGE_FAILED
+        - REFRESH_FAILED
+        - INFO_REQUEST_FAILED
+        - INFO_REQUEST_ERROR
+        - USERINFO_REQUEST_FAILED
+        - USERINFO_REQUEST_ERROR
+        - REVOKE_REQUEST_FAILED
+        - REVOKE_REQUEST_ERROR
+        - CONNECTIONS_LOOKUP_ERROR
+        - CONNECTIONS_LOOKUP_FAILED
+        - SESSIONS_LOOKUP_ERROR
+        - SESSIONS_LOOKUP_FAILED
+        - WEBHOOKS_NOT_SUPPORTED
+        - MANUAL_WEBHOOKS_NOT_SUPPORTED
+        - WEBHOOK_NOT_MANUAL
+        - WEBHOOK_KEY_UNAVAILABLE
+        - WEBHOOK_KIND_NOT_FOUND
+        - WEBHOOK_OPERATION_NOT_SUPPORTED
+        - WEBHOOK_CONFIG_GONE
+        - WEBHOOK_CONFIG_NO_METHOD
+        - WEBHOOK_CONFIG_NO_PATH
+        - WEBHOOK_INGRESS_URL_UNKNOWN
+        - WEBHOOK_LIST_FAILED
+    Revoked:
+      type: object
+      required: [revoked]
+      properties:
+        revoked: { const: true }
+
+    Connection:
+      type: object
+      required: [connectionKey, providerKey, integrationKey, authType, status, createdAt, updatedAt]
+      properties:
+        connectionKey: { type: string }
+        providerKey: { type: string }
+        integrationKey: { type: string }
+        externalUserId: { type: [string, 'null'] }
+        providerUserId: { type: [string, 'null'] }
+        authType: { type: string }
+        status: { $ref: '#/components/schemas/CredentialStatus' }
+        grantedScopes: { type: [array, 'null'] }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        lastRefreshedAt: { type: [string, 'null'], format: date-time }
+        lastUsedAt: { type: [string, 'null'], format: date-time }
+        lastError: { type: [string, 'null'] }
+        lastErrorAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        disconnectedAt: { type: [string, 'null'], format: date-time }
+    Session:
+      type: object
+      required: [sessionKey, providerKey, integrationKey, authType, status, createdAt, updatedAt]
+      properties:
+        sessionKey: { type: string }
+        providerKey: { type: string }
+        integrationKey: { type: string }
+        externalUserId: { type: [string, 'null'] }
+        providerUserId: { type: [string, 'null'] }
+        authType: { type: string }
+        status: { $ref: '#/components/schemas/CredentialStatus' }
+        grantedScopes: { type: [array, 'null'] }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        lastRefreshedAt: { type: [string, 'null'], format: date-time }
+        lastUsedAt: { type: [string, 'null'], format: date-time }
+        lastError: { type: [string, 'null'] }
+        lastErrorAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        disconnectedAt: { type: [string, 'null'], format: date-time }
+    CredentialStatus:
+      type: string
+      enum: [active, pending, reauth_required, error, revoked, inactive]
+    UserInfo:
+      type: object
+      required: [user, raw]
+      properties:
+        user:
+          type: object
+          additionalProperties: true
+          description: The fields the identity config maps (e.g. `email`, `name`).
+        raw:
+          type: object
+          additionalProperties: true
+          description: The provider's userinfo response, secrets redacted.
+    Integration:
+      type: object
+      required: [integrationId, providerId, providerKey, integrationKey, label]
+      properties:
+        integrationId: { type: string }
+        providerId: { type: string }
+        providerKey: { type: string }
+        integrationKey: { type: string }
+        label: { type: string }
+        status: { type: string }
+        enabled: { type: boolean }
+        auths: { type: array, items: { type: string } }
+        scopes:
+          type: object
+          additionalProperties: { type: array, items: { type: string } }
+        scopesByGroups:
+          type: object
+          additionalProperties: { type: array, items: { type: string } }
+        scopeIds: { type: array, items: { type: string } }
+        webhookUrls:
+          type: array
+          items: { $ref: '#/components/schemas/IntegrationWebhookUrl' }
+        deleteAt: { type: [string, 'null'], format: date-time }
+        provider:
+          oneOf:
+            - $ref: '#/components/schemas/ProviderSummary'
+            - type: 'null'
+    ProviderSummary:
+      type: object
+      properties:
+        name: { type: string }
+        status: { type: string }
+        slugs:
+          type: array
+          items:
+            type: object
+            properties:
+              slug: { type: string }
+              version: { type: string }
+        brandColors:
+          type: array
+          items: { $ref: '#/components/schemas/BrandColor' }
+        brandImages:
+          type: array
+          items: { $ref: '#/components/schemas/BrandImage' }
+    BrandColor:
+      type: object
+      required: [providerBrandColorId, name, role, hex]
+      properties:
+        providerBrandColorId: { type: string }
+        name: { type: string }
+        role: { type: string }
+        hex: { type: string }
+    BrandImage:
+      type: object
+      required: [providerBrandImageId, url, type, theme, color, description, sortOrder]
+      properties:
+        providerBrandImageId: { type: string }
+        url: { type: string, format: uri }
+        type: { type: string }
+        theme: { type: string }
+        color: { type: string }
+        description: { type: string }
+        sortOrder: { type: number }
+    IntegrationWebhookUrl:
+      type: object
+      required: [integrationWebhookUrlId, url]
+      properties:
+        integrationWebhookUrlId: { type: string }
+        url: { type: string, format: uri }
+        isActive: { type: boolean }
+    IdentityProvider:
+      allOf:
+        - $ref: '#/components/schemas/ProviderSummary'
+        - type: object
+          properties:
+            providerKey: { type: string }
+            integrations:
+              type: array
+              items:
+                type: object
+                properties:
+                  integrationKey: { type: string }
+                  label: { type: string }
+                  enabled: { type: boolean }
+    Webhook:
+      type: object
+      required: [webhookKey, status, createdAt, updatedAt]
+      properties:
+        webhookKey: { type: string }
+        kind: { type: [string, 'null'] }
+        status: { type: string }
+        providerWebhookId: { type: [string, 'null'] }
+        connectionKey: { type: [string, 'null'] }
+        metadata: { type: [string, 'null'] }
+        webhookData: { type: object, additionalProperties: true }
+        registeredAt: { type: [string, 'null'], format: date-time }
+        lastError: { type: [string, 'null'] }
+        lastErrorAt: { type: [string, 'null'], format: date-time }
+        lastDeliveredAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    WebhookMutation:
+      type: object
+      required: [success, webhookKey]
+      properties:
+        success: { const: true }
+        webhookKey: { type: string }
+        providerWebhookId: { type: [string, 'null'] }
+        kind: { type: [string, 'null'] }
+    FormField:
+      type: object
+      description: One input on the hosted setup form; webhook fields first, then connection fields.
+      required: [keyVal, name, type, required, isSecret]
+      properties:
+        providerWebhookFieldId: { type: string }
+        providerConnectionFieldId: { type: string }
+        keyVal: { type: string, description: The key to send the value under. }
+        name: { type: string }
+        type: { type: string }
+        inputType: { type: string }
+        helpUrl: { type: [string, 'null'] }
+        fillStage: { type: string }
+        defaultValue: {}
+        deprecated: { type: boolean }
+        required: { type: boolean }
+        validationRules: {}
+        isSecret: { type: boolean }
+        sort: { type: number }
+        allowHidden: { type: boolean }
+        allowPrefill: { type: boolean }
+        translations: {}
+        options:
+          type: array
+          items:
+            type: object
+            properties:
+              value: {}
+              translations: {}
+            additionalProperties: true
+      additionalProperties: true
+
+  headers:
+    RequestId:
+      description: Names this request in Saltline's logs; quote it when asking for help.
+      schema: { type: string }
+    Timestamp:
+      description: When the response was produced; signed together with the body.
+      schema: { type: string, format: date-time }
+    Signature:
+      description: Hex HMAC-SHA256 over `timestamp ‖ body`; two comma-separated values during a key rotation.
+      schema: { type: string }
+    ErrorCode:
+      description: The same `code` as the body. Present only on Saltline's own errors — a proxied provider error never has it.
+      schema: { type: string }
+    VersionServed:
+      description: The provider API version Saltline used (`default` when unpinned).
+      schema: { type: string }
+
+  responses:
+    Error:
+      description: |
+        A Saltline error. Common codes: `MISSING_CREDENTIALS`, `INVALID_API_KEY`,
+        `API_KEY_EXPIRED`, `IP_NOT_ALLOWED` (401);
+        `MISSING_CONNECTION_KEY`, `MISSING_SESSION_KEY`, `INTEGRATION_KEY_REQUIRED` (400);
+        `PROVIDER_NOT_FOUND`, `INTEGRATION_NOT_FOUND`, `CONNECTION_NOT_FOUND` (404);
+        `METHOD_NOT_ALLOWED` (405, with an `Allow` header); `CONFLICT` (409);
+        `LIMIT_EXCEEDED` (429); `PROVIDER_UNREACHABLE`, `REFRESH_FAILED` (502).
+      headers:
+        x-saltline-request-id: { $ref: '#/components/headers/RequestId' }
+        x-saltline-timestamp: { $ref: '#/components/headers/Timestamp' }
+        x-saltline-hmac-256: { $ref: '#/components/headers/Signature' }
+        x-saltline-error-code: { $ref: '#/components/headers/ErrorCode' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+

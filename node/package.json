@@ -1,0 +1,41 @@
+{
+  "name": "@aszura-inc/saltline-node",
+  "version": "0.1.0",
+  "description": "Saltline API client for Node.js and other server-side JavaScript runtimes",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aszura-Inc/saltline.git",
+    "directory": "node"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "openapi:types": "openapi-typescript ../openapi.yaml -o src/openapi.gen.ts",
+    "openapi:check": "openapi-typescript ../openapi.yaml -o src/openapi.gen.ts --check",
+    "prepublishOnly": "npm run openapi:check && npm run typecheck && npm test && npm run build",
+    "prepack": "node -e \"require('fs').copyFileSync('../LICENSE','LICENSE')\""
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}
