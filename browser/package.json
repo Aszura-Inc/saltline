@@ -1,6 +1,6 @@
 {
   "name": "@aszura/saltline-browser",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "description": "Browser helper for Saltline's connect and sign-in flows: PKCE, redirect and callback, with optional React bindings. Talks only to your own backend.",
   "license": "MIT",
   "type": "module",

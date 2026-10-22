@@ -29,6 +29,9 @@ This file is for AI coding assistants. Follow the rules first; the reference fol
    every later proxy, refresh, revoke and webhook call.
 9. All responses are associative arrays (shapes below), not objects. Exceptions:
    `ConnectionRedirect` (object) and proxy responses (PSR-7).
+10. **Serving `@aszura/saltline-browser`? Use `Saltline\ConnectFlow` / `Saltline\SignInFlow`.**
+    They are the start and finish endpoints the browser package calls. Don't hand-write those
+    endpoints or keep the provider in `$_SESSION`: the browser sends it with the finish payload.
 
 ## Install and create a client
 
@@ -70,29 +73,49 @@ if ($redirect->ok && $codeVerifier !== null) {
 }
 ```
 
-With `@aszura/saltline-browser` making the pair instead, write two JSON endpoints:
+## Serve `@aszura/saltline-browser` (browser-side PKCE)
+
+When the browser package makes the pair, mount its two endpoints with `ConnectFlow` (or
+`SignInFlow`). Both run behind your own login.
 
 ```php
-// POST /saltline/start
-$in = json_decode(file_get_contents('php://input'), true);
-$provider = in_array($in['provider'] ?? null, ['google', 'trello'], true) ? $in['provider'] : null;
-if ($provider === null) { http_response_code(400); exit; }
-$result = $saltline->connections->init($provider, [
-    'auth' => 'oAuth2',
-    'redirectUrl' => 'https://yourapp.com/connected',
-    'codeChallenge' => $in['codeChallenge'],
-    'codeChallengeMethod' => 'S256',
-    'externalUserId' => (string) $user->id,
-]);
-$_SESSION['saltline_provider'] = $provider;
-echo json_encode(['authorizationUrl' => $result['authorizationUrl'], 'connectionKey' => $result['connectionKey']]);
+$connect = new Saltline\ConnectFlow(
+    $saltline,
+    ['google', 'trello'],                 // allowlist; or ['trello' => ['integrationKey' => '…', 'auth' => 'oAuth1']]
+    'https://yourapp.com/connected',      // or fn (string $provider): string
+    // auth: 'oAuth2', theme: 'light'|'dark'
+);
 
+// Plain PHP: reads php://input, sets the status, echoes JSON.
+// POST /saltline/start
+$connect->serveStart(externalUserId: (string) $user->id);
 // POST /saltline/finish
-$in = json_decode(file_get_contents('php://input'), true);
-$connection = $saltline->connections->claim($_SESSION['saltline_provider'], $in['connectionKey'], $in['codeVerifier']);
-saveConnection($user->id, $connection['connectionKey']);
-echo json_encode(['connected' => true]);
+$connect->serveFinish(function (array $claimed) use ($user): array {
+    saveConnection($user->id, $claimed['connection']['connectionKey']);
+    return ['connected' => true];         // answered as JSON; null answers ['ok' => true]
+});
+
+// Laravel / Symfony / any framework: the same as ['status' => int, 'body' => array].
+$reply = $connect->replyStart($request->json()->all(), externalUserId: (string) $user->id);
+return response()->json($reply['body'], $reply['status']);
+$reply = $connect->replyFinish($request->json()->all(), fn (array $claimed) => save($claimed));
+
+// Lowest level, throwing instead of replying:
+$started = $connect->start($input, externalUserId: '…'); // ['provider', 'connectionKey', 'authorizationUrl']
+$claimed = $connect->finish($input);                      // ['provider', 'connectionKey', 'connection' => [...]]
 ```
+
+`SignInFlow($saltline, $providers, $redirectUrl, ?theme)` is the same for sign-in: start answers
+`['provider', 'sessionKey', 'authorizationUrl']`, finish gives `['provider', 'sessionKey', 'user', 'raw']`.
+
+Input: start takes `{provider, codeChallenge, codeChallengeMethod: 'S256'}`, finish takes
+`{provider, connectionKey|sessionKey, codeVerifier}`, exactly what the browser package sends. Bad
+input throws `Saltline\FlowInputException` (`$status` 400, `$errorCode` `UNKNOWN_PROVIDER` or
+`INVALID_INPUT`). `reply*` / `serve*` answer `['code', 'error', 'requestId'?]`: 400 for bad input
+or a claim Saltline refused (`CONNECTION_NOT_FOUND`, `SESSION_NOT_FOUND`, `CODE_VERIFIER_MISMATCH`,
+`MISSING_PKCE_PARAMETERS`), 502 for any other `SaltlineException`; anything else is rethrown.
+`Saltline\Flow::errorReply(\Throwable $e)` gives that reply (or null) for your own handlers, and
+`$connect->providers()` lists the allowlist.
 
 ## Sign users in
 
@@ -188,6 +211,14 @@ only needed when a provider has several integrations and no default.
 | `webhooks->initManual(string $provider, string $connectionKey, ?string $redirectUrl = null, ?string $integrationKey = null)` | `array{sessionId, webhookKey, setupUrl, ingressUrl, status: 'pending', fields}` |
 | `environment->integrations()` | `list<array>` |
 | `environment->identityProviders()` | `list<array>` |
+
+Browser-flow classes: `Saltline\ConnectFlow(Client $saltline, array $providers, string|\Closure $redirectUrl, string $auth = 'oAuth2', ?string $theme = null)`
+and `Saltline\SignInFlow(Client $saltline, array $providers, string|\Closure $redirectUrl, ?string $theme = null)`,
+both with `start(mixed $input, ?string $externalUserId = null)`, `finish(mixed $input)`,
+`replyStart(mixed $input, ?string $externalUserId = null)`, `replyFinish(mixed $input, callable $onClaimed)`
+→ `['status' => int, 'body' => array]`, `serveStart(?string $externalUserId = null)`,
+`serveFinish(callable $onClaimed)`, `providers()`; `Saltline\FlowInputException` (`$status`, `$errorCode`);
+`Saltline\Flow::errorReply(\Throwable $e)`.
 
 Static helpers: `Saltline\Pkce::create()` → `['codeVerifier', 'codeChallenge', 'codeChallengeMethod' => 'S256']`;
 `Saltline\ConnectionRedirect::parse(string $url)` → object with `ok`, `connectionKey`, `error`,

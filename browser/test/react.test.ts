@@ -89,19 +89,22 @@ async function renderHook<T>(useHook: () => T) {
 }
 
 describe('useSaltlineStart', () => {
-  it('starts the flow and stays pending while the page leaves', async () => {
+  it('starts the flow for a provider and stays pending while the page leaves', async () => {
     const { fetch, calls } = fakeFetch(json(200, INIT));
     const { latest } = await renderHook(() => useSaltlineStart({ url: '/start', fetch }));
 
     await act(async () => {
-      await latest.current!.start({ provider: 'google' });
+      await latest.current!.start('google', { state: 'settings', body: { integrationKey: 'k' } });
     });
 
     assert.deepEqual(assigned, [INIT.authorizationUrl]);
     assert.equal(calls[0]!.provider, 'google');
+    assert.equal(calls[0]!.integrationKey, 'k');
     assert.equal(latest.current!.pending, true);
     assert.equal(latest.current!.error, null);
-    assert.ok(storage.has('saltline:pkce:ck_1'));
+    const pending = JSON.parse(storage.get('saltline:pkce:ck_1')!) as Record<string, unknown>;
+    assert.equal(pending.provider, 'google');
+    assert.equal(pending.state, 'settings');
   });
 
   it('reports a failure through error and onError, and clears pending', async () => {
@@ -113,7 +116,7 @@ describe('useSaltlineStart', () => {
 
     let result: unknown = 'unset';
     await act(async () => {
-      result = await latest.current!.start();
+      result = await latest.current!.start('google');
     });
 
     assert.equal(result, undefined);
@@ -121,34 +124,52 @@ describe('useSaltlineStart', () => {
     assert.equal((latest.current!.error as { code: string }).code, 'START_FAILED');
     assert.equal(seen.length, 1);
   });
+
+  it('starts through send', async () => {
+    const payloads: Array<Record<string, unknown>> = [];
+    const { latest } = await renderHook(() =>
+      useSaltlineStart({ send: async (p) => (payloads.push(p), INIT), navigate: false }),
+    );
+
+    await act(async () => {
+      await latest.current!.start('google');
+    });
+
+    assert.equal(payloads[0]!.provider, 'google');
+    assert.equal(latest.current!.pending, false);
+    assert.ok(storage.has('saltline:pkce:ck_1'));
+  });
 });
 
 describe('useSaltlineFinish', () => {
-  async function startedFlow() {
+  async function startedFlow(state?: unknown) {
     const { fetch } = fakeFetch(json(200, INIT));
     const { latest } = await renderHook(() => useSaltlineStart({ url: '/start', fetch }));
     await act(async () => {
-      await latest.current!.start();
+      await latest.current!.start('google', { state });
     });
   }
 
   // react-test-renderer doesn't replay effects, so the StrictMode guard isn't tested here.
-  it('claims the redirect and reports the result', async () => {
-    await startedFlow();
+  it('claims the redirect and reports the result with its state', async () => {
+    await startedFlow({ tab: 'apps' });
     href = 'https://app.test/connected?connectionKey=ck_1';
     const { fetch, calls } = fakeFetch(json(200, { connected: true }));
 
-    const { latest } = await renderHook<UseSaltlineFinish<{ connected: boolean }>>(() =>
-      useSaltlineFinish({ url: '/finish', fetch }),
+    const { latest } = await renderHook<UseSaltlineFinish<{ connected: boolean }, { tab: string }>>(
+      () => useSaltlineFinish({ url: '/finish', fetch }),
     );
 
     assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.provider, 'google');
     assert.equal(latest.current!.loading, false);
     assert.deepEqual(latest.current!.result, {
       ok: true,
       kind: 'connection',
+      provider: 'google',
       key: 'ck_1',
       data: { connected: true },
+      state: { tab: 'apps' },
     });
   });
 
@@ -181,6 +202,42 @@ describe('useSaltlineFinish', () => {
     assert.equal(calls.length, 1);
     assert.equal(hook.latest.current!.result?.ok, true);
   });
+
+  it('lets a router clean the URL', async () => {
+    await startedFlow();
+    href = 'https://app.test/connected?connectionKey=ck_1&tab=apps';
+    const { fetch } = fakeFetch(json(200, {}));
+    const replaced: string[] = [];
+
+    await renderHook(() =>
+      useSaltlineFinish({ url: '/finish', fetch, cleanUrl: (path) => replaced.push(path) }),
+    );
+
+    assert.deepEqual(replaced, ['/connected?tab=apps']);
+    assert.equal(href, 'https://app.test/connected?connectionKey=ck_1&tab=apps');
+  });
+
+  it('claims through send with extra body, once, though send changes every render', async () => {
+    await startedFlow();
+    href = 'https://app.test/connected?connectionKey=ck_1';
+    const payloads: Array<Record<string, unknown>> = [];
+    // A new function each render, as an inline arrow would be.
+    const useInline = () =>
+      useSaltlineFinish({
+        send: async (p) => (payloads.push(p), { connected: true }),
+        body: { via: 'settings' },
+      });
+
+    const hook = await renderHook(useInline);
+    await hook.rerender(useInline);
+    await hook.rerender(useInline);
+
+    assert.equal(payloads.length, 1);
+    assert.equal(payloads[0]!.via, 'settings');
+    assert.equal(payloads[0]!.provider, 'google');
+    assert.equal(payloads[0]!.connectionKey, 'ck_1');
+    assert.equal(hook.latest.current!.result?.ok, true);
+  });
 });
 
 describe('SaltlineButton', () => {
@@ -189,23 +246,35 @@ describe('SaltlineButton', () => {
       renderer.root.findByType('button').props.onClick({ defaultPrevented });
     });
 
-  it('starts on click with its body, then shows busy', async () => {
+  it('starts on click with its provider, state and body, then shows busy', async () => {
     const { fetch, calls } = fakeFetch(json(200, INIT));
     let renderer!: ReactTestRenderer;
     await act(async () => {
       renderer = create(
-        createElement(SaltlineButton, { url: '/start', fetch, body: { provider: 'google' } }, 'Go'),
+        createElement(
+          SaltlineButton,
+          { url: '/start', fetch, provider: 'google', state: 'settings', body: { x: 1 } },
+          'Go',
+        ),
       );
     });
 
     const before = renderer.root.findByType('button').props;
     assert.equal(before.type, 'button');
     assert.equal(before.disabled, false);
+    for (const name of ['provider', 'state', 'body']) {
+      assert.equal(name in before, false, name);
+    }
 
     await click(renderer);
 
     assert.equal(calls[0]!.provider, 'google');
+    assert.equal(calls[0]!.x, 1);
     assert.deepEqual(assigned, [INIT.authorizationUrl]);
+    assert.equal(
+      (JSON.parse(storage.get('saltline:pkce:ck_1')!) as { state: unknown }).state,
+      'settings',
+    );
     const after = renderer.root.findByType('button').props;
     assert.equal(after.disabled, true);
     assert.equal(after['aria-busy'], true);
@@ -217,7 +286,12 @@ describe('SaltlineButton', () => {
     let renderer!: ReactTestRenderer;
     await act(async () => {
       renderer = create(
-        createElement(SaltlineButton, { url: '/start', fetch, onError: (e) => seen.push(e) }),
+        createElement(SaltlineButton, {
+          url: '/start',
+          fetch,
+          provider: 'google',
+          onError: (e) => seen.push(e),
+        }),
       );
     });
 
@@ -227,11 +301,31 @@ describe('SaltlineButton', () => {
     assert.equal(renderer.root.findByType('button').props.disabled, false);
   });
 
+  it('starts through send, which stays off the DOM button', async () => {
+    const payloads: Array<Record<string, unknown>> = [];
+    const send = async (p: Record<string, unknown>) => (payloads.push(p), INIT);
+    let renderer!: ReactTestRenderer;
+    await act(async () => {
+      renderer = create(createElement(SaltlineButton, { send, provider: 'google' }));
+    });
+
+    const props = renderer.root.findByType('button').props;
+    for (const name of ['send', 'url', 'headers', 'credentials', 'fetch']) {
+      assert.equal(name in props, false, name);
+    }
+
+    await click(renderer);
+    assert.equal(payloads[0]!.provider, 'google');
+    assert.deepEqual(assigned, [INIT.authorizationUrl]);
+  });
+
   it('does nothing when your onClick prevents default', async () => {
     const { fetch, calls } = fakeFetch();
     let renderer!: ReactTestRenderer;
     await act(async () => {
-      renderer = create(createElement(SaltlineButton, { url: '/start', fetch, onClick: () => {} }));
+      renderer = create(
+        createElement(SaltlineButton, { url: '/start', fetch, provider: 'google', onClick: () => {} }),
+      );
     });
     await click(renderer, true);
     assert.equal(calls.length, 0);

@@ -25,6 +25,10 @@ This file is for AI coding assistants. Follow the rules first; the reference fol
 7. **Verify webhooks with the raw body**, before any JSON parsing. A re-serialized body won't verify.
 8. Persist `connection.connectionKey` against your user after `claim`. It's the handle for every
    later proxy, refresh, revoke and webhook call.
+9. **Serving `@aszura/saltline-browser`? Use `connectFlow` / `signInFlow`.** They are the start and
+   finish endpoints the browser package calls, with Express and web-standard (`Request` →
+   `Response`) handlers. Don't hand-write those endpoints or store the provider in a session: the
+   browser sends it with the finish payload.
 
 ## Install and create a client
 
@@ -72,9 +76,47 @@ if (result.ok && codeVerifier) {
 }
 ```
 
-If the browser makes the PKCE pair instead (no server session), the server exposes two endpoints:
-start receives `{ codeChallenge, ... }` and answers `{ authorizationUrl, connectionKey }`; finish
-receives `{ connectionKey, codeVerifier }` and calls `claim`. See `@aszura/saltline-browser`.
+## Serve `@aszura/saltline-browser` (browser-side PKCE)
+
+When the browser package makes the pair, the server exposes a start and a finish endpoint.
+`connectFlow` / `signInFlow` are that pair; mount them rather than writing the endpoints.
+
+```ts
+import { Saltline, connectFlow, signInFlow } from '@aszura/saltline-node';
+
+const connect = connectFlow(saltline, {
+  providers: ['google', 'trello'],          // allowlist; or { trello: { integrationKey: '…', auth: 'oAuth1' } }
+  redirectUrl: 'https://yourapp.com/connected', // or (provider) => string
+  // auth: 'oAuth2', theme: 'light' | 'dark'
+});
+
+// Express / Next.js API routes (after express.json() and your login middleware):
+app.post('/saltline/start', requireLogin, connect.express.start((req) => ({ externalUserId: req.user.id })));
+app.post('/saltline/finish', requireLogin, connect.express.finish(async ({ connection }, req) => {
+  await db.saveConnection(req.user.id, connection.connectionKey);
+  return { connected: true };               // answered as JSON; undefined answers { ok: true }
+}));
+
+// Next.js App Router / Remix / Hono / SvelteKit / Workers (Request in, Response out):
+export const POST = connect.web.start(async (request) => ({ externalUserId: (await currentUser(request)).id }));
+export const POST = connect.web.finish(async ({ connection }, request) => { /* save; may throw a Response */ });
+
+// Any framework:
+const started = await connect.start(req.body, { externalUserId }); // { provider, connectionKey, authorizationUrl }
+const claimed = await connect.finish(req.body);                    // { provider, connectionKey, connection }
+```
+
+`signInFlow(saltline, options)` is the same for sign-in: start answers
+`{ provider, sessionKey, authorizationUrl }`, finish gives `{ provider, sessionKey, user, raw }`.
+
+Input: start takes `{ provider, codeChallenge, codeChallengeMethod: 'S256' }`, finish takes
+`{ provider, connectionKey | sessionKey, codeVerifier }`, exactly what the browser package sends.
+Bad input throws `FlowInputError` (`status` 400, `code` `UNKNOWN_PROVIDER` | `INVALID_INPUT`).
+The handlers answer `{ code, error, requestId? }`: 400 for bad input or a claim Saltline refused
+(`CONNECTION_NOT_FOUND`, `SESSION_NOT_FOUND`, `CODE_VERIFIER_MISMATCH`, `MISSING_PKCE_PARAMETERS`),
+502 for any other `SaltlineError`; anything else goes to `next(error)` / rethrows.
+`flowErrorReply(error)` gives that `{ status, body }` (or null) for your own handlers.
+`connect.providers` lists the allowlist.
 
 ## Sign users in
 
@@ -173,6 +215,11 @@ integrations and no default.
 | `webhooks.initManual(provider, { connectionKey, redirectUrl?, integrationKey? })` | `{ sessionId, webhookKey, setupUrl, ingressUrl, status: 'pending', fields }` |
 | `environment.integrations()` | `Integration[]` |
 | `environment.identityProviders()` | `IdentityProvider[]` |
+
+Browser-flow exports: `connectFlow(saltline, { providers, redirectUrl, auth?, theme? })` and
+`signInFlow(...)` → `Flow` with `start(input, { externalUserId? })`, `finish(input)`,
+`express.start(init?)`, `express.finish(onClaimed)`, `web.start(init?)`, `web.finish(onClaimed)`,
+`providers`; `FlowInputError` (`status: 400`, `code`); `flowErrorReply(error)` → `{ status, body } | null`.
 
 Standalone exports: `createPkce()` → `{ codeVerifier, codeChallenge, codeChallengeMethod: 'S256' }`;
 `parseConnectionRedirect(url)` → `{ ok: true, connectionKey } | { ok: false, error, errorMessage }`

@@ -49,6 +49,11 @@ if ($redirect->ok && $codeVerifier !== null) {
     // store $connection['connectionKey'] against your user — it's active now
 }
 
+// Or let @aszura/saltline-browser make the PKCE pair and mount its two endpoints:
+$connect = new Saltline\ConnectFlow($saltline, ['google', 'trello'], 'https://yourapp.com/connected');
+$connect->serveStart(externalUserId: (string) $user->id);                       // POST /saltline/start
+$connect->serveFinish(fn (array $claimed) => saveConnection($user, $claimed));   // POST /saltline/finish
+
 // Call the provider's API — you get its response exactly as it sent it.
 $response = $saltline->proxy->request('GET', 'trello', '1/members/me/boards', $connection['connectionKey']);
 

@@ -1,32 +1,52 @@
 # @aszura/saltline-browser
 
 > The browser half of Saltline's connect and sign-in flows. It makes a PKCE pair on click, keeps
-> the verifier in that tab's `sessionStorage`, navigates to the provider, and on return hands the
-> verifier to your backend. It never talks to Saltline and never sees the API key. Includes
-> optional React bindings at `@aszura/saltline-browser/react`. No dependencies.
+> the verifier (with the provider and your state) in that tab's `sessionStorage`, navigates to the
+> provider, and on return hands the provider and verifier to your backend. It never talks to
+> Saltline and never sees the API key. Includes optional React bindings at
+> `@aszura/saltline-browser/react`. No dependencies.
 
 This file is for AI coding assistants. Follow the rules first; the reference follows.
 
 ## Rules
 
-1. **This package only calls two endpoints you write on your own backend**: a start endpoint and a
-   finish endpoint. The backend calls Saltline with `@aszura/saltline-node` or `saltline/php`. Never
-   put a Saltline API key in browser code and never call `api.saltline.dev` from the browser.
-2. **Start endpoint contract:** receives JSON `{ ...body, codeChallenge, codeChallengeMethod: 'S256' }`,
-   calls `connections.init` (or `sessions.init`), and answers exactly
-   `{ authorizationUrl, connectionKey }` (or `{ authorizationUrl, sessionKey }`). The server sets
-   `auth` and `redirectUrl` itself. If the browser sends a provider, the server checks it
-   against an allowlist.
-3. **Finish endpoint contract:** receives JSON `{ connectionKey, codeVerifier }` (or
-   `{ sessionKey, codeVerifier }`), calls `claim`, stores the result against the logged-in user, and
-   answers any JSON. That answer becomes `result.data`.
-4. **Same tab start to finish.** `sessionStorage` is per tab. The provider must redirect back to
+1. **This package only calls two endpoints you mount on your own backend**: a start endpoint and
+   a finish endpoint. `@aszura/saltline-node` (`connectFlow` / `signInFlow`) and `saltline/php`
+   (`ConnectFlow` / `SignInFlow`) ship both, ready to mount; prefer them over hand-written
+   endpoints. Never put a Saltline API key in browser code and never call `api.saltline.dev` from
+   the browser.
+2. **`start` needs `provider`** (e.g. `'google'`). The package sends it to start, keeps it with the
+   verifier, and sends it to finish. Do not store the provider in your own session or a pending
+   table: the finish payload carries it.
+3. **Start endpoint contract:** receives JSON
+   `{ provider, codeChallenge, codeChallengeMethod: 'S256', ...body }`, checks `provider` against
+   an allowlist, calls `connections.init` (or `sessions.init`) with its own `auth` and
+   `redirectUrl`, and answers `{ authorizationUrl, connectionKey }` (or
+   `{ authorizationUrl, sessionKey }`).
+4. **Finish endpoint contract:** receives JSON `{ provider, connectionKey, codeVerifier, ...body }`
+   (or `sessionKey`), calls `claim(provider, key, codeVerifier)`, stores the result against the
+   logged-in user, and answers any JSON. That answer becomes `result.data`.
+5. **Carry app context with `state`, not the URL or your session.** `start({ state })` is kept in
+   the tab and comes back as `result.state` from `finish`. JSON only; it is never sent anywhere.
+6. **Same tab start to finish.** `sessionStorage` is per tab. The provider must redirect back to
    the tab that started the flow (normal redirects do). Don't open the authorization URL in a new
    tab or popup.
-5. **`finish` is one-shot.** It deletes the verifier before POSTing, so a reload can't replay it.
-   It's safe to call on every load of the redirect page; it returns `null` on an ordinary visit.
-6. Both endpoints should sit behind your normal login/CSRF protection. Requests use
-   `credentials: 'same-origin'` by default; pass CSRF tokens through `headers`.
+7. **`finish` is one-shot.** It deletes the pending flow before POSTing, so a reload can't replay
+   it. It's safe to call on every load of the redirect page; it returns `null` on an ordinary visit.
+8. **With a client-side router, pass `cleanUrl`.** The default `history.replaceState` is invisible
+   to React Router and Next.js. `cleanUrl: (path) => navigate(path, { replace: true })` (React
+   Router) or `cleanUrl: (path) => router.replace(path)` (Next.js) keeps the router in sync.
+9. **Next.js App Router: client components only.** `useSaltlineFinish`, `useSaltlineStart` and
+   `SaltlineButton` need `'use client'` at the top of the file that uses them.
+10. Both endpoints should sit behind your normal login/CSRF protection. Requests use
+    `credentials: 'same-origin'` by default; pass CSRF tokens through `headers`.
+11. **If the app already has an HTTP client** (axios instance, bearer tokens, refresh, `{ data }`
+    envelopes), pass `send` instead of `url`. Do not write a fake-`Response` `fetch` adapter.
+    `send(payload)` delivers the payload however the backend wants it and resolves the endpoint's
+    JSON. For `start` that must be `{ authorizationUrl, connectionKey | sessionKey }` at the top
+    level, so unwrap envelopes and rename fields inside `send`. `send` excludes `url`, `headers`,
+    `credentials` and `fetch`. `bind()`, `data-saltline-start` and the script tag's `data-finish`
+    only support `url`.
 
 ## Install
 
@@ -45,19 +65,22 @@ import { start, finish, SaltlineError } from '@aszura/saltline-browser';
 
 // Connect button:
 button.addEventListener('click', () => {
-  start({ url: '/saltline/start', body: { provider: 'google' } })
+  start({ url: '/saltline/start', provider: 'google', state: { returnTo: '/settings?tab=mail' } })
     .catch((error) => showError(error));
 });
 
 // Page at your redirectUrl:
 try {
-  const result = await finish<{ connected: boolean }>({ url: '/saltline/finish' });
+  const result = await finish<{ connected: boolean }, { returnTo: string }>({ url: '/saltline/finish' });
   if (result === null) {
     // not a Saltline redirect
   } else if (result.ok) {
-    // result.kind: 'connection' | 'session', result.key, result.data (your endpoint's JSON)
+    // result.kind: 'connection' | 'session', result.provider, result.key,
+    // result.data (your endpoint's JSON), result.state (what start was given)
+    location.replace(result.state.returnTo);
   } else {
-    // user declined / provider error: result.error, result.errorMessage
+    // user declined / provider error: result.error, result.errorMessage,
+    // result.state (from the flow this tab started last, or undefined)
   }
 } catch (error) {
   if (error instanceof SaltlineError && error.code === 'VERIFIER_NOT_FOUND') {
@@ -66,77 +89,117 @@ try {
 }
 ```
 
+Through an existing HTTP client (`send` instead of `url`; one line each):
+
+```ts
+// GET with query params; backend answers { data: { authUrl, sessionKey } }
+start({
+  provider,
+  send: (p) =>
+    api.get(`auth/${p.provider}`, { params: { redirect: p.redirect, codeChallenge: p.codeChallenge } })
+      .then((r) => ({ authorizationUrl: r.data.data.authUrl, sessionKey: r.data.data.sessionKey })),
+  body: { redirect: '/signed-in' },
+});
+
+// POST through an authed client; backend answers { data: { authorizationUrl, connectionKey } }
+start({ provider, send: (p) => api.post(`/integrations/init/${id}`, p).then((r) => r.data.data) });
+
+// Claim through the same client; p already has provider, key and codeVerifier
+finish({ send: (p) => api.post('auth', p).then((r) => r.data) });
+```
+
 Declarative buttons (with `bind()` from a bundle, or automatic with the script build):
 
 ```html
 <button data-saltline-start="/saltline/start" data-saltline-provider="google"
-        data-saltline-integration-key="abc">Connect Google</button>
+        data-saltline-state="settings" data-saltline-integration-key="abc">Connect Google</button>
 ```
 
-Every other `data-saltline-*` attribute becomes a camelCase body field (`provider`,
-`integrationKey`). While running, the button has `aria-busy="true"`. It dispatches bubbling
-`saltline:started` (detail: `StartResult`) or `saltline:error` (detail: the error). The script
-build's `data-finish` fires `saltline:finished` (detail: `FinishResult`) or `saltline:error` on
-`document`.
+`data-saltline-provider` is the provider, `data-saltline-state` the state (a string), and every
+other `data-saltline-*` attribute becomes a camelCase body field (`integrationKey`). While running,
+the button has `aria-busy="true"`. It dispatches bubbling `saltline:started` (detail:
+`StartResult`) or `saltline:error` (detail: the error). The script build's `data-finish` fires
+`saltline:finished` (detail: `FinishResult`) or `saltline:error` on `document`.
 
 ## React
 
 ```tsx
+'use client'; // Next.js App Router
 import { SaltlineButton, useSaltlineStart, useSaltlineFinish } from '@aszura/saltline-browser/react';
 
-<SaltlineButton url="/saltline/start" body={{ provider: 'google' }} onError={(e) => toast(String(e))}>
+<SaltlineButton url="/saltline/start" provider="google" state={{ returnTo: '/settings' }} onError={(e) => toast(String(e))}>
   Connect Google
 </SaltlineButton>;
 
 function Connected() {
-  const { loading, result, error } = useSaltlineFinish<{ connected: boolean }>({ url: '/saltline/finish' });
+  const navigate = useNavigate(); // React Router; Next.js: const router = useRouter() from 'next/navigation'
+  const { loading, result, error } = useSaltlineFinish<{ connected: boolean }, { returnTo: string }>({
+    url: '/saltline/finish',
+    cleanUrl: (path) => navigate(path, { replace: true }), // Next.js: router.replace(path)
+  });
   if (loading) return <p>Finishing…</p>;
   if (error) return <p>Something went wrong. Try connecting again.</p>;
   if (result?.ok === false) return <p>{result.errorMessage ?? 'Cancelled.'}</p>;
-  if (result?.ok) return <Navigate to="/settings/integrations" />;
+  if (result?.ok) return <Navigate to={result.state.returnTo} />;
   return null;
 }
 ```
 
-- `SaltlineButton`: `<button>` that runs `start` on click. It is disabled and `aria-busy` while
-  pending. Other props pass through to the button, and `type` defaults to `button`. An `onClick`
-  that calls `preventDefault()` cancels the start.
-- `useSaltlineStart(options)` returns `{ start(body?), pending, error }`. `start` never throws:
-  failures go to `error` and `onError`, and it resolves `undefined`.
+- `SaltlineButton`: `<button>` that runs `start` on click with its `provider`, `state` and `body`
+  props. It is disabled and `aria-busy` while pending. Other props pass through to the button, and
+  `type` defaults to `button`. An `onClick` that calls `preventDefault()` cancels the start. Takes
+  `url` or `send` (never forwarded to the DOM).
+- `useSaltlineStart(options)` returns `{ start(provider, { state?, body? }), pending, error }`.
+  One hook serves a whole menu of providers. `start` never throws: failures go to `error` and
+  `onError`, and it resolves `undefined`. Takes `url` or `send`.
 - `useSaltlineFinish(options)` runs `finish` once on mount (StrictMode-safe) and returns
   `{ loading, result, error }`. Pass `enabled: false` to defer, e.g. until your auth has loaded.
+  Takes `url` or `send`, plus `body` and `cleanUrl`. An inline `send` that changes every render is
+  fine.
 - React ≥ 16.8 is an optional peer dependency. Only the `/react` entry point imports it.
 
 ## API reference
 
 ```ts
-start(options: {
-  url: string;                          // your start endpoint
-  body?: Record<string, unknown>;       // extra JSON fields, e.g. { provider }
+// Endpoint options: exactly one of these two shapes (TypeScript enforces it; neither or both
+// rejects with a TypeError).
+type FetchEndpointOptions = {
+  url: string;                          // your endpoint, POSTed as JSON
   headers?: HeadersInit;                // e.g. CSRF token
   credentials?: RequestCredentials;     // default 'same-origin'
   fetch?: typeof fetch;
-  navigate?: ((url: string) => void) | false; // default location.assign; false = don't navigate
-}): Promise<{ kind: 'connection' | 'session'; key: string; authorizationUrl: string }>
+};
+type SendEndpointOptions = {
+  send: (payload: Record<string, unknown>) => Promise<unknown>; // resolve the endpoint's JSON
+};
 
-finish<T>(options: {
-  url: string;                          // your finish endpoint
-  headers?; credentials?; fetch?;
+start(options: (FetchEndpointOptions | SendEndpointOptions) & {
+  provider: string;                     // required; sent to start and finish
+  state?: unknown;                      // JSON; comes back as finish's result.state
+  body?: Record<string, unknown>;       // extra payload fields; provider wins on conflict
+  navigate?: ((url: string) => void) | false; // default location.assign; false = don't navigate
+}): Promise<{ kind: 'connection' | 'session'; provider: string; key: string; authorizationUrl: string }>
+
+finish<T, S>(options: (FetchEndpointOptions | SendEndpointOptions) & {
+  body?: Record<string, unknown>;       // extra payload fields; provider, key and codeVerifier win on conflict
   location?: string | URL;              // default location.href
-  cleanUrl?: boolean;                   // strip Saltline params from the address bar; default true unless `location` given
+  cleanUrl?: boolean | ((path: string) => void); // default true unless `location` given; a function gets
+                                        // the clean path+search+hash to replace through your router
 }): Promise<
-  | { ok: true; kind: 'connection' | 'session'; key: string; data: T }
-  | { ok: false; error: string; errorMessage: string | null }
+  | { ok: true; kind: 'connection' | 'session'; provider: string; key: string; data: T; state: S }
+  | { ok: false; error: string; errorMessage: string | null; state: S | undefined }
   | null                                // not a Saltline redirect
 >
 
-bind(root?: ParentNode = document, defaults?: Partial<StartOptions>): () => void  // returns unbind
+bind(root?: ParentNode = document, defaults?: { headers?; credentials?; fetch?; navigate? }): () => void  // returns unbind; url only
 createPkce(): Promise<{ codeVerifier; codeChallenge; codeChallengeMethod: 'S256' }>
 parseRedirect(url): { ok: true; kind; key } | { ok: false; error; errorMessage } | null
+redirectPath(url): string               // path + search + hash without Saltline's params
 ```
 
 `start` only navigates to `http(s)` URLs. It rejects anything else with `INVALID_START_RESPONSE`.
-Verifiers older than one hour are cleaned up the next time `start` runs.
+Pending flows older than one hour are cleaned up the next time `start` runs; a declined redirect
+drops the flow this tab started last.
 
 ## Errors
 
@@ -145,43 +208,50 @@ Verifiers older than one hour are cleaned up the next time `start` runs.
 
 | code | Meaning |
 | --- | --- |
-| `START_FAILED` | Start endpoint answered non-2xx or was unreachable. |
+| `START_FAILED` | Start endpoint answered non-2xx or was unreachable, or `send` rejected. |
 | `INVALID_START_RESPONSE` | Start endpoint's answer lacked an http(s) `authorizationUrl` or a `connectionKey`/`sessionKey`. |
-| `FINISH_FAILED` | Finish endpoint answered non-2xx or was unreachable. Start the flow again. |
+| `FINISH_FAILED` | Finish endpoint answered non-2xx or was unreachable, or `send` rejected. Start the flow again. |
 | `STORAGE_UNAVAILABLE` | `sessionStorage` blocked (some private modes, sandboxed iframes). |
 | `VERIFIER_NOT_FOUND` | This tab didn't start a flow for the key in the URL, or it was already used. |
 
-A provider-side failure or a user who declined is not thrown: `finish` returns `{ ok: false, error, errorMessage }`.
+When `send` rejects, the original error is `cause`. `status`/`body` are taken from `err.status`/`err.body`,
+else axios-style `err.response.status`/`err.response.data`, else `null`. A `SaltlineError` thrown by
+`send` is rethrown unchanged.
 
-## Server side (Node, Express)
+With the SDK-provided endpoints, `body` of a `FINISH_FAILED` / `START_FAILED` is
+`{ code, error, requestId? }`: `UNKNOWN_PROVIDER` or `INVALID_INPUT` (400), a claim Saltline
+refused such as `CODE_VERIFIER_MISMATCH` or `CONNECTION_NOT_FOUND` (400: start again), or any other
+Saltline code (502).
+
+A provider-side failure or a user who declined is not thrown: `finish` returns
+`{ ok: false, error, errorMessage, state }`.
+
+## Server side
+
+Node (Express), with `@aszura/saltline-node`:
 
 ```ts
-import { Saltline } from '@aszura/saltline-node';
+import { Saltline, connectFlow } from '@aszura/saltline-node';
 const saltline = new Saltline({ apiKey: process.env.SALTLINE_API_KEY! });
-const ALLOWED = new Set(['google', 'trello']);
+const connect = connectFlow(saltline, { providers: ['google', 'trello'], redirectUrl: 'https://yourapp.com/connected' });
 
-app.post('/saltline/start', requireLogin, async (req, res) => {
-  const provider = ALLOWED.has(req.body.provider) ? req.body.provider : null;
-  if (!provider) return res.sendStatus(400);
-  const { authorizationUrl, connectionKey } = await saltline.connections.init(provider, {
-    auth: 'oAuth2',
-    redirectUrl: 'https://yourapp.com/connected',
-    codeChallenge: req.body.codeChallenge,
-    codeChallengeMethod: 'S256',
-    externalUserId: req.user.id,
-  });
-  req.session.saltlineProvider = provider;
-  res.json({ authorizationUrl, connectionKey });
-});
-
-app.post('/saltline/finish', requireLogin, async (req, res) => {
-  const connection = await saltline.connections.claim(
-    req.session.saltlineProvider, req.body.connectionKey, req.body.codeVerifier,
-  );
+app.post('/saltline/start', requireLogin, connect.express.start((req) => ({ externalUserId: req.user.id })));
+app.post('/saltline/finish', requireLogin, connect.express.finish(async ({ connection }, req) => {
   await db.saveConnection(req.user.id, connection.connectionKey);
-  res.json({ connected: true });
-});
+  return { connected: true };
+}));
 ```
 
-For sign-in, use `sessions.init` / `sessions.claim`. The start endpoint answers `sessionKey`, and
-`finish` sends `{ sessionKey, codeVerifier }`.
+Next.js App Router / Remix / Hono / SvelteKit / Workers: `export const POST = connect.web.start(...)`
+and `connect.web.finish(...)`, `Request` in and `Response` out. Sign-in: `signInFlow` with the same
+shape; the claim result has `user` and `raw`.
+
+PHP, with `saltline/php`:
+
+```php
+$connect = new Saltline\ConnectFlow($saltline, ['google', 'trello'], 'https://yourapp.com/connected');
+$connect->serveStart(externalUserId: (string) $user->id);                  // POST /saltline/start
+$connect->serveFinish(fn (array $claimed) => saveAndAnswer($claimed));     // POST /saltline/finish
+// Frameworks: $connect->replyStart($input, $externalUserId) / replyFinish($input, $onClaimed)
+// return ['status' => int, 'body' => array]. Sign-in: Saltline\SignInFlow.
+```

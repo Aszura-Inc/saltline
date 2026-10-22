@@ -29,7 +29,17 @@ export function parseRedirect(url: string | URL): SaltlineRedirect | null {
 
 /** URL with Saltline's params removed. */
 export function stripRedirectParams(url: string | URL): string {
+  return stripped(url).toString();
+}
+
+/** Path, search and hash with Saltline's params removed: what a router's `navigate` takes. */
+export function redirectPath(url: string | URL): string {
+  const clean = stripped(url);
+  return clean.pathname + clean.search + clean.hash;
+}
+
+function stripped(url: string | URL): URL {
   const clean = new URL(url);
   for (const name of REDIRECT_PARAMS) clean.searchParams.delete(name);
-  return clean.toString();
+  return clean;
 }

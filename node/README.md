@@ -42,6 +42,52 @@ if (result.ok && codeVerifier) {
 }
 ```
 
+## Serve the browser package
+
+[`@aszura/saltline-browser`](../browser/README.md) makes the PKCE pair in the browser and calls two
+endpoints on your server: start and finish. `connectFlow` is that pair, ready to mount. Give it the
+providers you allow and the page the user comes back to; it checks the browser's input, calls
+`init` and `claim`, and answers what the package expects.
+
+```ts
+import { Saltline, connectFlow } from '@aszura/saltline-node';
+
+const saltline = new Saltline({ apiKey: process.env.SALTLINE_API_KEY! });
+const connect = connectFlow(saltline, {
+  providers: ['google', 'trello'], // or { trello: { integrationKey: '…', auth: 'oAuth1' } }
+  redirectUrl: 'https://yourapp.com/connected',
+});
+
+// Express (after express.json() and your login middleware):
+app.post('/saltline/start', requireLogin, connect.express.start((req) => ({ externalUserId: req.user.id })));
+app.post('/saltline/finish', requireLogin, connect.express.finish(async ({ connection }, req) => {
+  await db.saveConnection(req.user.id, connection.connectionKey);
+  return { connected: true }; // the browser gets this as result.data
+}));
+```
+
+Next.js App Router, Remix, Hono, SvelteKit and Workers take a `Request` and return a `Response`:
+
+```ts
+// app/saltline/start/route.ts
+export const POST = connect.web.start(async (request) => ({ externalUserId: (await currentUser(request)).id }));
+
+// app/saltline/finish/route.ts
+export const POST = connect.web.finish(async ({ connection }, request) => {
+  const user = await currentUser(request); // throw a Response to answer 401 or redirect
+  await db.saveConnection(user.id, connection.connectionKey);
+  return { connected: true };
+});
+```
+
+Sign-in is `signInFlow` with the same options; its claim result is `{ provider, sessionKey, user, raw }`.
+
+Underneath, `connect.start(input, { externalUserId })` and `connect.finish(input)` do the work for
+any other framework. They throw `FlowInputError` (`status` 400, `code` `UNKNOWN_PROVIDER` or
+`INVALID_INPUT`) for bad input and `SaltlineError` for Saltline's answer; `flowErrorReply(error)`
+turns either into `{ status, body }` the way the handlers do: 400 for bad input or a claim Saltline
+refused (expired, reused, wrong verifier), 502 for any other Saltline error, null for anything else.
+
 ## Call the provider's API
 
 ```ts
@@ -87,7 +133,7 @@ it. Two ways to do that:
 **The browser makes the pair**, best when your backend keeps no session. The browser keeps the
 verifier in `sessionStorage`, sends your backend only the challenge for `init`, and sends the
 verifier back at the callback for `claim`. [`@aszura/saltline-browser`](../browser/README.md) does the
-browser side, connections included, and shows the two endpoints your server needs.
+browser side, connections included, and `signInFlow` [serves it](#serve-the-browser-package).
 
 **Your server makes the pair** — best when you already have server sessions. Keep the verifier in
 this user's session, behind their cookie:

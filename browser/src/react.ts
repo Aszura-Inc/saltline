@@ -13,20 +13,24 @@ import {
 import {
   finish,
   start,
+  type EndpointOptions,
   type FinishOptions,
   type FinishResult,
   type StartOptions,
   type StartResult,
 } from './flow.ts';
 
-export type UseSaltlineStartOptions = Omit<StartOptions, 'body'> & {
+export type UseSaltlineStartOptions = EndpointOptions & Pick<StartOptions, 'navigate'> & {
   /** Called on failure. */
   onError?: (error: unknown) => void;
 };
 
+/** Per-click extras for `start`. */
+export type StartExtras = Pick<StartOptions, 'state' | 'body'>;
+
 export interface UseSaltlineStart {
-  /** Runs `start`; resolves undefined on failure (see `error`). */
-  start: (body?: Record<string, unknown>) => Promise<StartResult | undefined>;
+  /** Runs `start` for a provider; resolves undefined on failure (see `error`). */
+  start: (provider: string, extras?: StartExtras) => Promise<StartResult | undefined>;
   /** True until the page leaves or the call fails. */
   pending: boolean;
   /** Last failure, cleared on the next start. */
@@ -41,12 +45,12 @@ export function useSaltlineStart(options: UseSaltlineStartOptions): UseSaltlineS
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const run = useCallback(async (body?: Record<string, unknown>) => {
+  const run = useCallback(async (provider: string, extras: StartExtras = {}) => {
     setPending(true);
     setError(null);
     try {
-      const { onError: _onError, ...startOptions } = optionsRef.current;
-      const result = await start({ ...startOptions, body });
+      // Spread whole (start ignores onError): rest-destructuring would collapse the url|send union.
+      const result = await start({ ...optionsRef.current, provider, ...extras });
       // Stay pending while the page navigates away.
       if (optionsRef.current.navigate === false) setPending(false);
       return result;
@@ -66,23 +70,23 @@ export type UseSaltlineFinishOptions = FinishOptions & {
   enabled?: boolean;
 };
 
-export interface UseSaltlineFinish<T> {
+export interface UseSaltlineFinish<T, S = unknown> {
   loading: boolean;
   /** Null until settled, or if the page wasn't a Saltline redirect. */
-  result: FinishResult<T> | null;
+  result: FinishResult<T, S> | null;
   error: unknown;
 }
 
-/** Runs `finish` once on mount. */
-export function useSaltlineFinish<T = unknown>(
+/** Runs `finish` once on mount. Client-only: mark the component `'use client'` in Next.js. */
+export function useSaltlineFinish<T = unknown, S = unknown>(
   options: UseSaltlineFinishOptions,
-): UseSaltlineFinish<T> {
+): UseSaltlineFinish<T, S> {
   const optionsRef = useRef(options);
   optionsRef.current = options;
   // Guards StrictMode's double effect; a second finish would find no verifier.
   const ran = useRef(false);
   const enabled = options.enabled ?? true;
-  const [state, setState] = useState<UseSaltlineFinish<T>>({
+  const [state, setState] = useState<UseSaltlineFinish<T, S>>({
     loading: false,
     result: null,
     error: null,
@@ -91,9 +95,9 @@ export function useSaltlineFinish<T = unknown>(
   useEffect(() => {
     if (!enabled || ran.current) return;
     ran.current = true;
-    const { enabled: _enabled, ...finishOptions } = optionsRef.current;
     setState({ loading: true, result: null, error: null });
-    finish<T>(finishOptions).then(
+    // Read from the ref, not deps, so a new `send` each render can't re-run it.
+    finish<T, S>(optionsRef.current).then(
       (result) => setState({ loading: false, result, error: null }),
       (error: unknown) => setState({ loading: false, result: null, error }),
     );
@@ -103,9 +107,10 @@ export function useSaltlineFinish<T = unknown>(
 }
 
 export type SaltlineButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'onError'> &
-  UseSaltlineStartOptions & {
-    /** Start endpoint body, e.g. `{ provider: 'google' }`. */
-    body?: Record<string, unknown>;
+  UseSaltlineStartOptions &
+  StartExtras & {
+    /** Provider key, e.g. `google`. */
+    provider: string;
   };
 
 /** Button that runs `start`; disabled while pending. Other props go to the `<button>`. */
@@ -114,7 +119,10 @@ export function SaltlineButton({
   headers,
   credentials,
   fetch,
+  send,
   navigate,
+  provider,
+  state,
   body,
   onError,
   onClick,
@@ -123,10 +131,8 @@ export function SaltlineButton({
   ...buttonProps
 }: SaltlineButtonProps): ReactElement {
   const { start: run, pending } = useSaltlineStart({
-    url,
-    headers,
-    credentials,
-    fetch,
+    // start throws a TypeError if neither is given.
+    ...(send === undefined ? { url: url as string, headers, credentials, fetch } : { send }),
     navigate,
     onError,
   });
@@ -139,7 +145,7 @@ export function SaltlineButton({
     onClick: (event: MouseEvent<HTMLButtonElement>) => {
       onClick?.(event);
       if (event.defaultPrevented) return;
-      void run(body);
+      void run(provider, { state, body });
     },
   });
 }

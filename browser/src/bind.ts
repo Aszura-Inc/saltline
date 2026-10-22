@@ -1,14 +1,16 @@
-import { start, type StartOptions, type StartResult } from './flow.ts';
+import { start, type FetchEndpointOptions, type StartOptions, type StartResult } from './flow.ts';
 
 const bound = new WeakSet<Element>();
 
 /**
- * Binds `[data-saltline-start]` clicks to `start`; other `data-saltline-*` attrs become body fields.
+ * Binds `[data-saltline-start]` clicks to `start`. `data-saltline-provider` is the provider,
+ * `data-saltline-state` the state, and other `data-saltline-*` attrs become body fields.
  * e.g. `<button data-saltline-start="/start" data-saltline-provider="google">`. Returns an unbind.
+ * fetch only: `send` can't come from an attribute.
  */
 export function bind(
   root: ParentNode = document,
-  defaults: Partial<Omit<StartOptions, 'url' | 'body'>> = {},
+  defaults: Omit<FetchEndpointOptions, 'url' | 'send'> & Pick<StartOptions, 'navigate'> = {},
 ): () => void {
   const cleanups: Array<() => void> = [];
 
@@ -21,7 +23,7 @@ export function bind(
       if (element.getAttribute('aria-busy') === 'true') return;
       element.setAttribute('aria-busy', 'true');
 
-      start({ ...defaults, url: element.dataset.saltlineStart ?? '', body: bodyFrom(element) })
+      start({ ...defaults, url: element.dataset.saltlineStart ?? '', ...fieldsFrom(element) })
         .then((result: StartResult) => {
           // Stay busy while the page navigates away.
           if (defaults.navigate === false) element.removeAttribute('aria-busy');
@@ -47,13 +49,18 @@ export function bind(
   return () => cleanups.forEach((cleanup) => cleanup());
 }
 
-function bodyFrom(element: HTMLElement): Record<string, string> {
+function fieldsFrom(element: HTMLElement): Pick<StartOptions, 'provider' | 'state' | 'body'> {
   const body: Record<string, string> = {};
+  let provider = '';
+  let state: string | undefined;
   for (const [name, value] of Object.entries(element.dataset)) {
     if (!name.startsWith('saltline') || name === 'saltlineStart' || value === undefined) continue;
     const field = name.slice('saltline'.length);
     if (field === '') continue;
-    body[field.charAt(0).toLowerCase() + field.slice(1)] = value;
+    const camel = field.charAt(0).toLowerCase() + field.slice(1);
+    if (camel === 'provider') provider = value;
+    else if (camel === 'state') state = value;
+    else body[camel] = value;
   }
-  return body;
+  return { provider, state, body };
 }
