@@ -1,10 +1,10 @@
-# @aszura-inc/saltline-node
+# @aszura/saltline-node
 
 The Saltline API client for Node.js 20+ and other server-side JavaScript runtimes (Deno, Bun, edge
 workers).
 
 ```sh
-npm install @aszura-inc/saltline-node
+npm install @aszura/saltline-node
 ```
 
 It holds your secret API key, so use it on your server only — never in a browser or mobile app.
@@ -16,7 +16,7 @@ Connecting uses PKCE: the connection only goes live once you `claim` it with the
 only this user's browser reaches it — their session, never a store looked up by `connectionKey`.
 
 ```ts
-import { Saltline, createPkce, parseConnectionRedirect } from '@aszura-inc/saltline-node';
+import { Saltline, createPkce, parseConnectionRedirect } from '@aszura/saltline-node';
 
 const saltline = new Saltline({ apiKey: process.env.SALTLINE_API_KEY! });
 
@@ -55,7 +55,7 @@ refusals throw.
 ## Errors
 
 ```ts
-import { SaltlineError } from '@aszura-inc/saltline-node';
+import { SaltlineError } from '@aszura/saltline-node';
 
 try {
   await saltline.connections.refresh('google', connectionKey);
@@ -71,7 +71,7 @@ Branch on `error.code`, never on `error.message`. Quote `error.requestId` when a
 ## Verify webhooks
 
 ```ts
-import { verifyWebhook } from '@aszura-inc/saltline-node';
+import { verifyWebhook } from '@aszura/saltline-node';
 
 // Use the raw body, before any JSON parsing.
 const valid = await verifyWebhook(request.headers, rawBody, process.env.SALTLINE_SIGNING_SECRET!);
@@ -86,14 +86,14 @@ it. Two ways to do that:
 
 **The browser makes the pair**, best when your backend keeps no session. The browser keeps the
 verifier in `sessionStorage`, sends your backend only the challenge for `init`, and sends the
-verifier back at the callback for `claim`. [`@aszura-inc/saltline-browser`](../browser/README.md) does the
+verifier back at the callback for `claim`. [`@aszura/saltline-browser`](../browser/README.md) does the
 browser side, connections included, and shows the two endpoints your server needs.
 
 **Your server makes the pair** — best when you already have server sessions. Keep the verifier in
 this user's session, behind their cookie:
 
 ```ts
-import { createPkce } from '@aszura-inc/saltline-node';
+import { createPkce } from '@aszura/saltline-node';
 
 // Starting sign-in:
 const pkce = await createPkce();

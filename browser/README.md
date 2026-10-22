@@ -1,4 +1,4 @@
-# @aszura-inc/saltline-browser
+# @aszura/saltline-browser
 
 The browser half of Saltline's connect and sign-in flows. It makes the PKCE pair when the user
 clicks, keeps the verifier in that tab, sends the user to the provider, and hands the verifier back
@@ -6,7 +6,7 @@ to your server when they return. Under 3 KB gzipped, no dependencies, any framew
 optional [React bindings](#react).
 
 **It never talks to Saltline.** Your secret API key stays on your server, which calls `init` and
-`claim` with [`saltline/php`](../README.md#php) or [`@aszura-inc/saltline-node`](../node/README.md). The
+`claim` with [`saltline/php`](../README.md#php) or [`@aszura/saltline-node`](../node/README.md). The
 package only calls two endpoints you write: one to start, one to finish.
 
 ```
@@ -19,13 +19,13 @@ redirect ─▶ finish(): ─▶ POST /saltline/finish { connectionKey, codeVeri
 ## Install
 
 ```sh
-npm install @aszura-inc/saltline-browser
+npm install @aszura/saltline-browser
 ```
 
 Or with no build step, from a CDN:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/@aszura-inc/saltline-browser@0.1.0/dist/saltline.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@aszura/saltline-browser@0.1.0/dist/saltline.min.js"></script>
 ```
 
 ## Start: a button
@@ -42,7 +42,7 @@ button has `aria-busy="true"`; a failure fires a bubbling `saltline:error` event
 From a bundle, call `bind()` once the buttons are on the page, or call `start` yourself:
 
 ```ts
-import { start } from '@aszura-inc/saltline-browser';
+import { start } from '@aszura/saltline-browser';
 
 button.addEventListener('click', () =>
   start({ url: '/saltline/start', body: { provider: 'google' } }).catch(showError),
@@ -57,7 +57,7 @@ key and navigates there. It will only navigate to an `http(s)` URL.
 ## Finish: the page at your redirectUrl
 
 ```ts
-import { finish } from '@aszura-inc/saltline-browser';
+import { finish } from '@aszura/saltline-browser';
 
 const result = await finish({ url: '/saltline/finish' });
 if (result === null) {
@@ -89,11 +89,11 @@ With the `<script>` build, put the endpoint on the tag and listen for the outcom
 
 ## React
 
-`@aszura-inc/saltline-browser/react` wraps the same two steps. React 16.8+ is an optional peer dependency;
+`@aszura/saltline-browser/react` wraps the same two steps. React 16.8+ is an optional peer dependency;
 nothing React-related loads unless you import this path.
 
 ```tsx
-import { SaltlineButton, useSaltlineFinish } from '@aszura-inc/saltline-browser/react';
+import { SaltlineButton, useSaltlineFinish } from '@aszura/saltline-browser/react';
 
 function ConnectGoogle() {
   return (
@@ -160,7 +160,7 @@ echo json_encode(['connected' => true]);
 ```
 
 ```ts
-// Express, with @aszura-inc/saltline-node
+// Express, with @aszura/saltline-node
 app.post('/saltline/start', requireLogin, async (req, res) => {
   const provider = ALLOWED.has(req.body.provider) ? req.body.provider : null;
   if (!provider) return res.sendStatus(400);

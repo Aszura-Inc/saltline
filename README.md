@@ -7,14 +7,14 @@ without handling their credentials yourself.
 | Language | Package | Folder |
 | --- | --- | --- |
 | PHP 8.1+ | [`saltline/php`](https://packagist.org/packages/saltline/php) | [`php/`](php/) |
-| Node.js 20+ | [`@aszura-inc/saltline-node`](https://www.npmjs.com/package/@aszura-inc/saltline-node) | [`node/`](node/) |
-| Browser (+ React) | [`@aszura-inc/saltline-browser`](https://www.npmjs.com/package/@aszura-inc/saltline-browser) | [`browser/`](browser/) |
+| Node.js 20+ | [`@aszura/saltline-node`](https://www.npmjs.com/package/@aszura/saltline-node) | [`node/`](node/) |
+| Browser (+ React) | [`@aszura/saltline-browser`](https://www.npmjs.com/package/@aszura/saltline-browser) | [`browser/`](browser/) |
 
 The server SDKs are generated against the same contract, [`openapi.yaml`](openapi.yaml), and tested against
 the same fixtures in [`tests/fixtures`](tests/fixtures), so they behave the same way.
 
 The PHP and Node SDKs hold your secret API key: use them on your server only, never in a browser or
-app. `@aszura-inc/saltline-browser` is the other half of the connect and sign-in flows: it makes the PKCE pair
+app. `@aszura/saltline-browser` is the other half of the connect and sign-in flows: it makes the PKCE pair
 in the browser and talks only to your own backend, never to Saltline.
 
 ## PHP
@@ -75,7 +75,7 @@ cd browser && npm install && npm test        # Browser
 repo). After updating it, regenerate the Node types with
 `npm run openapi:types` in `node/`; `npm run openapi:check` fails while they're stale. All three
 packages are released together under one version: tag `vX.Y.Z` (Packagist reads the tag) and
-publish `@aszura-inc/saltline-node@X.Y.Z` from `node/` and `@aszura-inc/saltline-browser@X.Y.Z` from `browser/`.
+publish `@aszura/saltline-node@X.Y.Z` from `node/` and `@aszura/saltline-browser@X.Y.Z` from `browser/`.
 
 ## License
 

@@ -1,0 +1,210 @@
+# @aszura/saltline-node
+
+> Saltline API client for server-side JavaScript (Node.js 20+, Deno, Bun, edge workers). Connects
+> end users' third-party accounts, calls those providers' APIs through Saltline, manages provider
+> webhooks, and signs users in with OAuth2. Holds the secret API key: server-side only.
+
+This file is for AI coding assistants. Follow the rules first; the reference follows.
+
+## Rules
+
+1. **Server only.** `new Saltline({ apiKey })` takes the secret key. Never import this package in
+   browser or mobile code; use `@aszura/saltline-browser` there, which talks only to your backend.
+2. **PKCE on every connect and sign-in.** `connections.init` / `sessions.init` take a
+   `codeChallenge`; `claim` needs the matching `codeVerifier`. The connection or session is not
+   live until claimed. Store the verifier where only the starting user's browser reaches it (their
+   server session, or the browser's `sessionStorage` via `@aszura/saltline-browser`). **Never store
+   it in a lookup keyed by `connectionKey` or `sessionKey`**, because the key appears in the redirect URL.
+3. **Claim once.** `claim` is single-use and expires 30 minutes after the provider step. Delete the
+   stored verifier before or right after claiming.
+4. **Set `auth`, `redirectUrl` and the provider on the server.** If the browser picks a provider,
+   check it against an allowlist.
+5. **Branch on `error.code`, never `error.message`.** Unknown codes: fall back to `error.status`.
+6. **Proxy responses are the provider's.** `proxy.fetch` returns a `Response` for every provider
+   status (4xx/5xx included). Check `response.ok` yourself. Only Saltline's own refusals throw.
+7. **Verify webhooks with the raw body**, before any JSON parsing. A re-serialized body won't verify.
+8. Persist `connection.connectionKey` against your user after `claim`. It's the handle for every
+   later proxy, refresh, revoke and webhook call.
+
+## Install and create a client
+
+```ts
+// npm install @aszura/saltline-node
+import { Saltline } from '@aszura/saltline-node';
+
+const saltline = new Saltline({
+  apiKey: process.env.SALTLINE_API_KEY!,
+  // environment: 'staging',            // default 'production'
+  // baseUrl: 'https://…/v1',            // overrides environment; include /v1
+  // fetch: customFetch,                 // default globalThis.fetch
+});
+```
+
+Base URLs: production `https://api.saltline.dev/v1`, staging `https://api-staging.saltline.dev/v1`
+(exported as `BASE_URLS`).
+
+## Connect a user's account (server-side PKCE)
+
+```ts
+import { createPkce, parseConnectionRedirect } from '@aszura/saltline-node';
+
+// Start, e.g. POST /connect/google, behind your login:
+const pkce = await createPkce();
+const { authorizationUrl } = await saltline.connections.init('google', {
+  auth: 'oAuth2',
+  redirectUrl: 'https://yourapp.com/connected',
+  codeChallenge: pkce.codeChallenge,
+  codeChallengeMethod: pkce.codeChallengeMethod, // 'S256'
+  externalUserId: user.id,                       // optional, your user id
+});
+req.session.saltlineConnect = pkce.codeVerifier;
+res.redirect(authorizationUrl);
+
+// Return, GET /connected, same browser session:
+const result = parseConnectionRedirect(fullRequestUrl);
+const codeVerifier = req.session.saltlineConnect;
+delete req.session.saltlineConnect;
+if (result.ok && codeVerifier) {
+  const connection = await saltline.connections.claim('google', result.connectionKey, codeVerifier);
+  await db.saveConnection(user.id, connection.connectionKey);
+} else if (!result.ok) {
+  // result.error, result.errorMessage: user declined or provider failed
+}
+```
+
+If the browser makes the PKCE pair instead (no server session), the server exposes two endpoints:
+start receives `{ codeChallenge, ... }` and answers `{ authorizationUrl, connectionKey }`; finish
+receives `{ connectionKey, codeVerifier }` and calls `claim`. See `@aszura/saltline-browser`.
+
+## Sign users in
+
+```ts
+const pkce = await createPkce();
+const { sessionKey, authorizationUrl } = await saltline.sessions.init('google', {
+  auth: 'oAuth2',
+  redirectUrl: 'https://yourapp.com/signed-in',
+  codeChallenge: pkce.codeChallenge,
+  codeChallengeMethod: 'S256',
+});
+req.session.saltline = { sessionKey, codeVerifier: pkce.codeVerifier };
+// redirect to authorizationUrl, then at /signed-in:
+const pending = req.session.saltline;
+delete req.session.saltline;
+const { user, raw } = await saltline.sessions.claim('google', pending.sessionKey, pending.codeVerifier);
+```
+
+## Call a provider's API
+
+```ts
+const response = await saltline.proxy.fetch('trello', '1/members/me/boards', { connectionKey });
+if (!response.ok) { /* provider error: inspect response.status / body */ }
+const boards = await response.json();
+
+await saltline.proxy.fetch('github', 'repos/acme/app/issues', {
+  connectionKey,
+  method: 'POST',
+  body: { title: 'Bug' },          // sent as JSON
+  query: { per_page: '50' },
+  headers: { Accept: 'application/vnd.github+json' },
+  // contentType: 'application/x-www-form-urlencoded', // format the provider receives
+  // version: '2022-11-28',        // pin provider API version
+  // integrationKey: '…',          // only if the provider has several integrations and no default
+});
+```
+
+`path` is the provider's API path, without a leading host. It must be non-empty and contain no
+`..` segment. Caller headers starting with `x-saltline-` are dropped.
+
+Async: `await saltline.proxy.enqueue(provider, path, { connectionKey, callbackUrl })` returns
+`{ requestId }` (HTTP 202). The provider's response is POSTed to `callbackUrl` (public HTTPS).
+Verify that callback with `verifyWebhook`.
+
+## Webhooks
+
+```ts
+import { verifyWebhook } from '@aszura/saltline-node';
+
+// Express: app.post('/hooks/saltline', express.raw({ type: '*/*' }), handler)
+const valid = await verifyWebhook(req.headers, req.body /* Buffer/raw string */, process.env.SALTLINE_SIGNING_SECRET!);
+if (!valid) return res.sendStatus(401);
+const event = JSON.parse(req.body.toString());
+```
+
+`secrets` may be an array during secret rotation. Default timestamp tolerance is 300 s
+(`{ toleranceSeconds }` to change). `verifyWebhook` never throws; it returns false.
+
+Manage subscriptions on a connection:
+
+```ts
+await saltline.webhooks.register('github', { connectionKey, kind: 'push', metadata: 'repo-42', body: { /* kind-specific */ } });
+await saltline.webhooks.list('github', { connectionKey });
+await saltline.webhooks.get('github', webhookKey, { connectionKey });
+await saltline.webhooks.update('github', webhookKey, { connectionKey, body: { … } });
+await saltline.webhooks.delete('github', webhookKey, { connectionKey });
+const { ingressUrl, setupUrl } = await saltline.webhooks.initManual('stripe', { connectionKey, redirectUrl });
+```
+
+## API reference
+
+All methods are async and throw `SaltlineError` on a Saltline error. `provider` is the provider key,
+e.g. `'google'`. The optional `integrationKey` is only needed when a provider has several
+integrations and no default.
+
+| Call | Returns |
+| --- | --- |
+| `connections.init(provider, { auth, redirectUrl, codeChallenge, codeChallengeMethod: 'S256', externalUserId?, theme?: 'light' \| 'dark' }, { integrationKey? })` | `{ connectionKey, authorizationUrl, message? }` |
+| `connections.claim(provider, connectionKey, codeVerifier)` | `Connection` |
+| `connections.refresh(provider, connectionKey)` | `Connection` (throws `CONFLICT` if a refresh is running) |
+| `connections.revoke(provider, connectionKey, { integrationKey? })` | `void` |
+| `connections.list(provider, { integrationKey })` | `Connection[]` |
+| `sessions.init(provider, { auth: 'oAuth2', redirectUrl, codeChallenge, codeChallengeMethod, externalUserId?, theme? }, { integrationKey? })` | `{ sessionKey, authorizationUrl, message? }` |
+| `sessions.claim(provider, sessionKey, codeVerifier)` | `UserInfo` `{ user, raw }` |
+| `sessions.userinfo(provider, sessionKey, { integrationKey? })` | `UserInfo` (live from provider) |
+| `sessions.refresh(provider, sessionKey)` | `Session` |
+| `sessions.revoke(provider, sessionKey, { integrationKey? })` | `void` |
+| `sessions.list(provider, { integrationKey? })` | `Session[]` |
+| `proxy.fetch(provider, path, ProxyRequest)` | `Response` (any provider status) |
+| `proxy.enqueue(provider, path, ProxyRequest & { callbackUrl })` | `{ requestId }` |
+| `webhooks.register(provider, { connectionKey, kind?, webhookKey?, metadata?, version?, body?, integrationKey? })` | `{ success, webhookKey, providerWebhookId?, kind? }` |
+| `webhooks.list(provider, { connectionKey, integrationKey? })` | `Webhook[]` |
+| `webhooks.get(provider, webhookKey, { connectionKey, integrationKey? })` | `Webhook` |
+| `webhooks.update(provider, webhookKey, { connectionKey, body?, version?, integrationKey? })` | `{ success, webhookKey, … }` |
+| `webhooks.delete(provider, webhookKey, { connectionKey, version?, integrationKey? })` | `{ success, webhookKey, … }` |
+| `webhooks.initManual(provider, { connectionKey, redirectUrl?, integrationKey? })` | `{ sessionId, webhookKey, setupUrl, ingressUrl, status: 'pending', fields }` |
+| `environment.integrations()` | `Integration[]` |
+| `environment.identityProviders()` | `IdentityProvider[]` |
+
+Standalone exports: `createPkce()` → `{ codeVerifier, codeChallenge, codeChallengeMethod: 'S256' }`;
+`parseConnectionRedirect(url)` → `{ ok: true, connectionKey } | { ok: false, error, errorMessage }`
+(`error` is `'missing_connection_key'` when the URL has neither param);
+`verifyWebhook(headers, rawBody, secrets, opts?)`; `verifyResponse(response, secrets, opts?)`;
+`verifySignature({ body, timestamp, signature, secrets, toleranceSeconds? })`.
+
+Types: `Connection`, `Session`, `Webhook`, `Integration`, `IdentityProvider`, `UserInfo`,
+`FormField`, `AuthType` (`oAuth1 | oAuth2 | api_key | basic | session`), `CredentialStatus`
+(`active | pending | reauth_required | error | revoked | inactive`), `ProxyRequest`,
+`SaltlineOptions`.
+
+## Errors
+
+```ts
+import { SaltlineError } from '@aszura/saltline-node';
+
+try {
+  await saltline.connections.refresh('google', connectionKey);
+} catch (error) {
+  if (error instanceof SaltlineError) {
+    error.status;    // HTTP status
+    error.code;      // stable code; `HTTP_<status>` if none was sent
+    error.requestId; // quote in support requests
+    error.body;      // parsed JSON or raw text
+  }
+}
+```
+
+Common codes: `INVALID_API_KEY`, `API_KEY_EXPIRED`, `IP_NOT_ALLOWED`, `RATE_LIMITED`,
+`LIMIT_EXCEEDED`, `CONFLICT` (refresh already running; retry shortly), `PROVIDER_NOT_FOUND`,
+`INTEGRATION_NOT_FOUND`, `INTEGRATION_KEY_REQUIRED` (pass `integrationKey`),
+`CONNECTION_NOT_FOUND`, `SESSION_NOT_FOUND`, `WEBHOOK_NOT_FOUND`, `MISSING_PKCE_PARAMETERS`,
+`CODE_VERIFIER_MISMATCH` (wrong or reused verifier; start again), `AUTH_TYPE_NOT_SUPPORTED`,
+`BLOCKED_PATH`. The full list is in `openapi.yaml` under `components.schemas.Error`.

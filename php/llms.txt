@@ -1,0 +1,222 @@
+# saltline/php
+
+> Saltline API client for PHP 8.1+. Connects end users' third-party accounts, calls those
+> providers' APIs through Saltline, manages provider webhooks, and signs users in with OAuth2.
+> Works with any PSR-18 HTTP client (auto-discovered). Holds the secret API key: server-side only.
+
+This file is for AI coding assistants. Follow the rules first; the reference follows.
+
+## Rules
+
+1. **Never expose the API key.** Never echo it, put it in JavaScript, or send it to the browser.
+   Browser code uses `@aszura/saltline-browser`, which talks only to your PHP endpoints.
+2. **PKCE on every connect and sign-in.** `init` takes a `codeChallenge`; `claim` needs the
+   matching `codeVerifier`. Nothing is live until claimed. Keep the verifier in the starting
+   user's `$_SESSION`, or in the browser's `sessionStorage` via `@aszura/saltline-browser`.
+   **Never store it in a table or cache keyed by `connectionKey` or `sessionKey`**, because the key
+   appears in the redirect URL.
+3. **Claim once.** Single-use, expires 30 minutes after the provider step. `unset()` the stored
+   verifier when you read it.
+4. **Set `auth`, `redirectUrl` and the provider on the server.** If the request picks a provider,
+   check it against an allowlist with `in_array(..., true)`.
+5. **Branch on `$e->errorCode`, never `$e->getMessage()`.** Unknown codes: fall back to `$e->status`.
+6. **Proxy responses are the provider's.** `$saltline->proxy->request()` returns a PSR-7
+   `ResponseInterface` for every provider status. Check `getStatusCode()` yourself. Only Saltline's own
+   refusals throw.
+7. **Verify webhooks with the raw body** (`file_get_contents('php://input')`), never a
+   re-encoded `json_decode` result.
+8. Persist `$connection['connectionKey']` against your user after `claim`. It's the handle for
+   every later proxy, refresh, revoke and webhook call.
+9. All responses are associative arrays (shapes below), not objects. Exceptions:
+   `ConnectionRedirect` (object) and proxy responses (PSR-7).
+
+## Install and create a client
+
+```php
+// composer require saltline/php   (plus a PSR-18 client, e.g. guzzlehttp/guzzle)
+$saltline = new Saltline\Client(
+    apiKey: getenv('SALTLINE_API_KEY'),
+    // environment: 'staging',          // default 'production'
+    // baseUrl: 'https://…/v1',          // overrides environment; include /v1
+    // httpClient: $psr18Client,         // requestFactory:, streamFactory: also accepted
+);
+```
+
+## Connect a user's account
+
+```php
+// Start (behind your login):
+$pkce = Saltline\Pkce::create();
+$result = $saltline->connections->init('google', [
+    'auth' => 'oAuth2',
+    'redirectUrl' => 'https://yourapp.com/connected',
+    'codeChallenge' => $pkce['codeChallenge'],
+    'codeChallengeMethod' => $pkce['codeChallengeMethod'], // 'S256'
+    'externalUserId' => (string) $user->id,                // optional
+]);
+$_SESSION['saltline_connect'] = $pkce['codeVerifier'];
+header('Location: ' . $result['authorizationUrl']);
+exit;
+
+// Return at /connected, same browser session:
+$redirect = Saltline\ConnectionRedirect::parse($_SERVER['REQUEST_URI']);
+$codeVerifier = $_SESSION['saltline_connect'] ?? null;
+unset($_SESSION['saltline_connect']);
+if ($redirect->ok && $codeVerifier !== null) {
+    $connection = $saltline->connections->claim('google', $redirect->connectionKey, $codeVerifier);
+    saveConnection($user->id, $connection['connectionKey']);
+} elseif (!$redirect->ok) {
+    // $redirect->error, $redirect->errorMessage: declined or provider failure
+}
+```
+
+With `@aszura/saltline-browser` making the pair instead, write two JSON endpoints:
+
+```php
+// POST /saltline/start
+$in = json_decode(file_get_contents('php://input'), true);
+$provider = in_array($in['provider'] ?? null, ['google', 'trello'], true) ? $in['provider'] : null;
+if ($provider === null) { http_response_code(400); exit; }
+$result = $saltline->connections->init($provider, [
+    'auth' => 'oAuth2',
+    'redirectUrl' => 'https://yourapp.com/connected',
+    'codeChallenge' => $in['codeChallenge'],
+    'codeChallengeMethod' => 'S256',
+    'externalUserId' => (string) $user->id,
+]);
+$_SESSION['saltline_provider'] = $provider;
+echo json_encode(['authorizationUrl' => $result['authorizationUrl'], 'connectionKey' => $result['connectionKey']]);
+
+// POST /saltline/finish
+$in = json_decode(file_get_contents('php://input'), true);
+$connection = $saltline->connections->claim($_SESSION['saltline_provider'], $in['connectionKey'], $in['codeVerifier']);
+saveConnection($user->id, $connection['connectionKey']);
+echo json_encode(['connected' => true]);
+```
+
+## Sign users in
+
+```php
+$pkce = Saltline\Pkce::create();
+$result = $saltline->sessions->init('google', [
+    'auth' => 'oAuth2',
+    'redirectUrl' => 'https://yourapp.com/signed-in',
+    'codeChallenge' => $pkce['codeChallenge'],
+    'codeChallengeMethod' => 'S256',
+]);
+$_SESSION['saltline'] = ['sessionKey' => $result['sessionKey'], 'codeVerifier' => $pkce['codeVerifier']];
+// redirect to $result['authorizationUrl'], then at /signed-in:
+$pending = $_SESSION['saltline'];
+unset($_SESSION['saltline']);
+$info = $saltline->sessions->claim('google', $pending['sessionKey'], $pending['codeVerifier']);
+$info['user']; // normalized user; $info['raw'] is the provider's payload
+```
+
+## Call a provider's API
+
+```php
+$response = $saltline->proxy->request('GET', 'trello', '1/members/me/boards', $connectionKey);
+if ($response->getStatusCode() >= 400) { /* provider error */ }
+$boards = json_decode((string) $response->getBody(), true);
+
+$saltline->proxy->request(
+    'POST', 'github', 'repos/acme/app/issues', $connectionKey,
+    body: ['title' => 'Bug'],                         // sent as JSON
+    query: ['per_page' => '50'],
+    headers: ['Accept' => 'application/vnd.github+json'],
+    // contentType: 'application/x-www-form-urlencoded', version: '2022-11-28', integrationKey: '…',
+);
+```
+
+`$path` must be non-empty and contain no `..` segment. Caller headers starting with `x-saltline-`
+are dropped.
+
+Async: `$saltline->proxy->enqueue($method, $provider, $path, $connectionKey, $callbackUrl, ...)`
+returns `['requestId' => …]` (HTTP 202). The provider's response is POSTed to `$callbackUrl`
+(public HTTPS). Verify it with `Signature::verifyWebhook`.
+
+## Webhooks
+
+```php
+$raw = file_get_contents('php://input');
+if (!Saltline\Signature::verifyWebhook(getallheaders(), $raw, getenv('SALTLINE_SIGNING_SECRET'))) {
+    http_response_code(401);
+    exit;
+}
+$event = json_decode($raw, true);
+```
+
+`$secrets` may be an array during rotation. Default tolerance is 300 s. It never throws.
+`Signature::verifyMessage($psr7Message, $secrets)` works on PSR-7 requests/responses and rewinds the
+body. `Signature::verify($body, $timestamp, $signature, $secrets)` is the low-level form.
+
+```php
+$saltline->webhooks->register('github', $connectionKey, body: [/* kind-specific */], kind: 'push', metadata: 'repo-42');
+$saltline->webhooks->list('github', $connectionKey);
+$saltline->webhooks->get('github', $webhookKey, $connectionKey);
+$saltline->webhooks->update('github', $webhookKey, $connectionKey, body: [...]);
+$saltline->webhooks->delete('github', $webhookKey, $connectionKey);
+$manual = $saltline->webhooks->initManual('stripe', $connectionKey, redirectUrl: 'https://yourapp.com/done');
+// paste $manual['ingressUrl'] at the provider, send the user to $manual['setupUrl']
+```
+
+## API reference
+
+All methods throw `Saltline\SaltlineException` on a Saltline error. `?string $integrationKey` is
+only needed when a provider has several integrations and no default.
+
+| Call | Returns |
+| --- | --- |
+| `connections->init(string $provider, array{auth, redirectUrl, codeChallenge, codeChallengeMethod: 'S256', externalUserId?, theme?: 'light'\|'dark'} $body, ?string $integrationKey = null)` | `array{connectionKey, authorizationUrl, message?}` |
+| `connections->claim(string $provider, string $connectionKey, string $codeVerifier)` | Connection array |
+| `connections->refresh(string $provider, string $connectionKey)` | Connection array (409 `CONFLICT` if a refresh is running) |
+| `connections->revoke(string $provider, string $connectionKey, ?string $integrationKey = null)` | `void` |
+| `connections->list(string $provider, string $integrationKey)` | `list<Connection>` |
+| `sessions->init(string $provider, array{auth: 'oAuth2', redirectUrl, codeChallenge, codeChallengeMethod, externalUserId?, theme?} $body, ?string $integrationKey = null)` | `array{sessionKey, authorizationUrl, message?}` |
+| `sessions->claim(string $provider, string $sessionKey, string $codeVerifier)` | `array{user, raw}` |
+| `sessions->userinfo(string $provider, string $sessionKey, ?string $integrationKey = null)` | `array{user, raw}` |
+| `sessions->refresh(string $provider, string $sessionKey)` | Session array |
+| `sessions->revoke(string $provider, string $sessionKey, ?string $integrationKey = null)` | `void` |
+| `sessions->list(string $provider, ?string $integrationKey = null)` | `list<Session>` |
+| `proxy->request(string $method, string $provider, string $path, string $connectionKey, mixed $body = null, array $query = [], array $headers = [], ?string $integrationKey = null, ?string $version = null, ?string $contentType = null)` | `Psr\Http\Message\ResponseInterface` |
+| `proxy->enqueue(string $method, string $provider, string $path, string $connectionKey, string $callbackUrl, …same optional args)` | `array{requestId}` |
+| `webhooks->register(string $provider, string $connectionKey, array $body = [], ?string $kind = null, ?string $webhookKey = null, ?string $metadata = null, ?string $version = null, ?string $integrationKey = null)` | `array{success, webhookKey, providerWebhookId?, kind?}` |
+| `webhooks->list(string $provider, string $connectionKey, ?string $integrationKey = null)` | `list<Webhook>` |
+| `webhooks->get(string $provider, string $webhookKey, string $connectionKey, ?string $integrationKey = null)` | Webhook array |
+| `webhooks->update(string $provider, string $webhookKey, string $connectionKey, array $body = [], ?string $version = null, ?string $integrationKey = null)` | `array{success, webhookKey, …}` |
+| `webhooks->delete(string $provider, string $webhookKey, string $connectionKey, ?string $version = null, ?string $integrationKey = null)` | `array{success, webhookKey, …}` |
+| `webhooks->initManual(string $provider, string $connectionKey, ?string $redirectUrl = null, ?string $integrationKey = null)` | `array{sessionId, webhookKey, setupUrl, ingressUrl, status: 'pending', fields}` |
+| `environment->integrations()` | `list<array>` |
+| `environment->identityProviders()` | `list<array>` |
+
+Static helpers: `Saltline\Pkce::create()` → `['codeVerifier', 'codeChallenge', 'codeChallengeMethod' => 'S256']`;
+`Saltline\ConnectionRedirect::parse(string $url)` → object with `ok`, `connectionKey`, `error`,
+`errorMessage` (`error` is `'missing_connection_key'` when the URL has neither param);
+`Saltline\Signature::verifyWebhook / verifyMessage / verify`.
+
+Connection array keys: `connectionKey, providerKey, integrationKey, externalUserId?,
+providerUserId?, authType, status, grantedScopes?, expiresAt?, lastRefreshedAt?, lastUsedAt?,
+lastError?, lastErrorAt?, createdAt, updatedAt, disconnectedAt?`. Session arrays have the same
+keys with `sessionKey` in place of `connectionKey`. `authType` is one of `oAuth1, oAuth2, api_key,
+basic, session`. `status` is one of `active, pending, reauth_required, error, revoked, inactive`.
+
+## Errors
+
+```php
+try {
+    $saltline->connections->refresh('google', $connectionKey);
+} catch (Saltline\SaltlineException $e) {
+    $e->status;     // HTTP status
+    $e->errorCode;  // stable code; "HTTP_<status>" if none was sent
+    $e->requestId;  // quote in support requests
+    $e->body;       // decoded JSON or raw text
+    if ($e->errorCode === 'CONFLICT') { /* refresh already running; retry shortly */ }
+}
+```
+
+Common codes: `INVALID_API_KEY`, `API_KEY_EXPIRED`, `IP_NOT_ALLOWED`, `RATE_LIMITED`,
+`LIMIT_EXCEEDED`, `CONFLICT`, `PROVIDER_NOT_FOUND`, `INTEGRATION_NOT_FOUND`,
+`INTEGRATION_KEY_REQUIRED` (pass `$integrationKey`), `CONNECTION_NOT_FOUND`, `SESSION_NOT_FOUND`,
+`WEBHOOK_NOT_FOUND`, `MISSING_PKCE_PARAMETERS`, `CODE_VERIFIER_MISMATCH` (wrong or reused
+verifier; start again), `AUTH_TYPE_NOT_SUPPORTED`, `BLOCKED_PATH`. The full list is in
+`openapi.yaml` under `components.schemas.Error`.
